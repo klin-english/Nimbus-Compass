@@ -36,6 +36,10 @@ class Assignment {
       : _estimatedTime = estimatedTime.abs(),
         _baselineEfficiency = _subject.efficiencyFactor;
 
+  double get estimatedTime => _estimatedTime;
+
+  String get subjectName => _subject.name;
+
   double get adjustedEstimate {
     return _estimatedTime * _baselineEfficiency;
   }
@@ -47,6 +51,58 @@ class Assignment {
 
   double? get actualTime => _actualTime;
   String get title => _title;
+}
+
+class AssignmentTracker {
+  final List<Assignment> assignments = [];
+  final Map<String, Subject> _subjects = {};
+
+  AssignmentTracker();
+
+  AssignmentTracker.fromJson(Map<String, dynamic> json) {
+    final list = json['assignments'] as List<dynamic>? ?? [];
+    for (final item in list) {
+      final map = Map<String, dynamic>.from(item as Map);
+      final subjectName = (map['subject'] as String?) ?? 'Unknown';
+      final subjectKey = subjectName.toLowerCase();
+      final subject = _subjects.putIfAbsent(
+        subjectKey,
+        () => Subject(subjectName, true, []),
+      );
+
+      final title = (map['title'] as String?) ?? 'Untitled';
+      final estimated = (map['estimated'] as num?)?.toDouble() ?? 0.0;
+
+      final assignment = Assignment(title, subject, estimated);
+      if (map.containsKey('actual') && map['actual'] != null) {
+        assignment.complete((map['actual'] as num).toDouble());
+      }
+
+      assignments.add(assignment);
+    }
+  }
+
+  Map<String, dynamic> toJson() {
+    return {
+      'assignments': assignments.map((a) {
+        return {
+          'title': a.title,
+          'subject': a.subjectName,
+          'estimated': a.estimatedTime,
+          'actual': a.actualTime,
+        };
+      }).toList(),
+    };
+  }
+
+  Assignment completeAssignment(String title, String subjectName, double estimate, double actual) {
+    final key = subjectName.toLowerCase();
+    final subject = _subjects.putIfAbsent(key, () => Subject(subjectName, true, []));
+    final assignment = Assignment(title, subject, estimate);
+    assignment.complete(actual);
+    assignments.add(assignment);
+    return assignment;
+  }
 }
 
 double readTimeMinutes(String prompt) {
@@ -164,7 +220,7 @@ void main() {
     print("  -> Original Estimate: ${estimate.toStringAsFixed(2)} min");
     print("  -> Adjusted Estimate (based on history): ${task.adjustedEstimate.toStringAsFixed(2)} min");
     print("  -> Actual Time Taken: ${actual.toStringAsFixed(2)} min");
-    print("-" * 40);
+    print(List.filled(40, '-').join());
   }
 
   print("\nProcessing complete.");
