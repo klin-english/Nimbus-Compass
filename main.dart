@@ -2,7 +2,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'assignment.dart';
 
-String get stateFilePath() {
+String stateFilePath() {
   final scriptPath = Platform.script.toFilePath();
   final dir = File(scriptPath).parent.path;
   return '$dir/assignment_state.json';
@@ -134,7 +134,8 @@ void main() {
     print('Title: ${assignment.title}');
     print('Original Estimate: ${assignment.estimatedTime.toStringAsFixed(2)} min');
     print('Adjusted Estimate: ${assignment.adjustedEstimate.toStringAsFixed(2)} min');
-    print('Actual Time: ${assignment.actualTime.toStringAsFixed(2)} min');
+    final actualText = assignment.actualTime != null ? assignment.actualTime!.toStringAsFixed(2) : 'N/A';
+    print('Actual Time: $actualText min');
     print('Subject: ${assignment.subjectName}');
   }
 
