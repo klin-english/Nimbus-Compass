@@ -4,7 +4,7 @@ class Subject {
   final String _name;
   final bool _likesSubject;
   final List<String> _assignmentTypes;
-  
+
   double _totalEstimatedTime = 0;
   double _totalActualTime = 0;
   int _completedAssignments = 0;
@@ -33,8 +33,8 @@ class Assignment {
   double? _actualTime;
 
   Assignment(this._title, this._subject, double estimatedTime)
-      : _estimatedTime = estimatedTime.abs(),
-        _baselineEfficiency = _subject.efficiencyFactor;
+    : _estimatedTime = estimatedTime.abs(),
+      _baselineEfficiency = _subject.efficiencyFactor;
 
   double get estimatedTime => _estimatedTime;
 
@@ -95,13 +95,31 @@ class AssignmentTracker {
     };
   }
 
-  Assignment completeAssignment(String title, String subjectName, double estimate, double actual) {
+  Assignment completeAssignment(
+    String title,
+    String subjectName,
+    double estimate,
+    double actual,
+  ) {
     final key = subjectName.toLowerCase();
-    final subject = _subjects.putIfAbsent(key, () => Subject(subjectName, true, []));
+    final subject = _subjects.putIfAbsent(
+      key,
+      () => Subject(subjectName, true, []),
+    );
     final assignment = Assignment(title, subject, estimate);
     assignment.complete(actual);
     assignments.add(assignment);
     return assignment;
+  }
+
+  void addAssignment(String title, String subjectName, double estimate) {
+    final key = subjectName.toLowerCase();
+    final subject = _subjects.putIfAbsent(
+      key,
+      () => Subject(subjectName, true, []),
+    );
+    final assignment = Assignment(title, subject, estimate);
+    assignments.add(assignment);
   }
 }
 
@@ -120,7 +138,9 @@ double readTimeMinutes(String prompt) {
 Map<String, Object>? parseAssignmentLine(String line) {
   final trimmed = line.trim();
   final firstComma = trimmed.indexOf(',');
-  final secondComma = firstComma >= 0 ? trimmed.indexOf(',', firstComma + 1) : -1;
+  final secondComma = firstComma >= 0
+      ? trimmed.indexOf(',', firstComma + 1)
+      : -1;
 
   if (firstComma < 0 || secondComma < 0) {
     return null;
@@ -135,18 +155,16 @@ Map<String, Object>? parseAssignmentLine(String line) {
     return null;
   }
 
-  return {
-    'title': title,
-    'estimate': estimate.abs(),
-    'subject': subjectName,
-  };
+  return {'title': title, 'estimate': estimate.abs(), 'subject': subjectName};
 }
 
 double measureActualTimeMinutes() {
   stdout.write("Press Enter to start the timer...");
   stdin.readLineSync();
   final start = DateTime.now();
-  stdout.write("Timer started. Press Enter again when assignment is finished...");
+  stdout.write(
+    "Timer started. Press Enter again when assignment is finished...",
+  );
   stdin.readLineSync();
   final end = DateTime.now();
   final elapsedSeconds = end.difference(start).inSeconds;

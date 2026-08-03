@@ -48,11 +48,7 @@ Map<String, Object>? parseAssignmentLine(String line) {
     return null;
   }
 
-  return {
-    'title': title,
-    'estimate': estimate.abs(),
-    'subject': subjectName,
-  };
+  return {'title': title, 'estimate': estimate.abs(), 'subject': subjectName};
 }
 
 double measureActualTimeMinutes() {
@@ -61,7 +57,9 @@ double measureActualTimeMinutes() {
 
   final start = DateTime.now();
 
-  stdout.write('Timer started. Press Enter again when the assignment is finished...');
+  stdout.write(
+    'Timer started. Press Enter again when the assignment is finished...',
+  );
   stdin.readLineSync();
 
   final end = DateTime.now();
@@ -89,6 +87,16 @@ void main() {
     final lower = value.toLowerCase();
 
     if (lower == 'quit') {
+      if (pendingAssignments.isNotEmpty) {
+        for (final data in pendingAssignments) {
+          tracker.addAssignment(
+            data['title'] as String,
+            data['subject'] as String,
+            data['estimate'] as double,
+          );
+        }
+        print('Saved ${pendingAssignments.length} pending assignment(s).');
+      }
       saveTracker(tracker);
       print('Saved state and exited.');
       return;
@@ -132,9 +140,15 @@ void main() {
 
     print('Saved assignment to file.');
     print('Title: ${assignment.title}');
-    print('Original Estimate: ${assignment.estimatedTime.toStringAsFixed(2)} min');
-    print('Adjusted Estimate: ${assignment.adjustedEstimate.toStringAsFixed(2)} min');
-    final actualText = assignment.actualTime != null ? assignment.actualTime!.toStringAsFixed(2) : 'N/A';
+    print(
+      'Original Estimate: ${assignment.estimatedTime.toStringAsFixed(2)} min',
+    );
+    print(
+      'Adjusted Estimate: ${assignment.adjustedEstimate.toStringAsFixed(2)} min',
+    );
+    final actualText = assignment.actualTime != null
+        ? assignment.actualTime!.toStringAsFixed(2)
+        : 'N/A';
     print('Actual Time: $actualText min');
     print('Subject: ${assignment.subjectName}');
   }
