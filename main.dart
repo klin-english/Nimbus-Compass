@@ -69,10 +69,12 @@ double measureActualTimeMinutes() {
 
 void main() {
   final tracker = loadTracker();
-  final pendingAssignments = <Map<String, Object>>[];
+  final pendingAssignments = tracker.pendingAssignments;
 
-  print('Loaded ${tracker.assignments.length} previous assignment(s).');
   print('Storage file: ${stateFilePath()}');
+  if (pendingAssignments.isNotEmpty) {
+    print('Found ${pendingAssignments.length} unfinished assignment(s).');
+  }
 
   while (true) {
     stdout.write(
@@ -87,16 +89,6 @@ void main() {
     final lower = value.toLowerCase();
 
     if (lower == 'quit') {
-      if (pendingAssignments.isNotEmpty) {
-        for (final data in pendingAssignments) {
-          tracker.addAssignment(
-            data['title'] as String,
-            data['subject'] as String,
-            data['estimate'] as double,
-          );
-        }
-        print('Saved ${pendingAssignments.length} pending assignment(s).');
-      }
       saveTracker(tracker);
       print('Saved state and exited.');
       return;
@@ -116,25 +108,25 @@ void main() {
       continue;
     }
 
-    pendingAssignments.add(parsed);
+    final newAssignment = tracker.addAssignment(
+      parsed['title'] as String,
+      parsed['subject'] as String,
+      parsed['estimate'] as double,
+    );
+    pendingAssignments.add(newAssignment);
     print('Queued assignment: ${parsed['title']}');
   }
 
   for (int i = 0; i < pendingAssignments.length; i++) {
-    final data = pendingAssignments[i];
-    final title = data['title'] as String;
-    final estimate = data['estimate'] as double;
-    final subjectName = data['subject'] as String;
+    final assignment = pendingAssignments[i];
+    final title = assignment.title;
+    final estimate = assignment.estimatedTime;
+    final subjectName = assignment.subjectName;
 
     print('\nTiming assignment #${i + 1}: $title');
     final actual = measureActualTimeMinutes();
 
-    final assignment = tracker.completeAssignment(
-      title,
-      subjectName,
-      estimate,
-      actual,
-    );
+    tracker.completePendingAssignment(assignment, actual);
 
     saveTracker(tracker);
 

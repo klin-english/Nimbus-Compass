@@ -50,6 +50,7 @@ class Assignment {
   }
 
   double? get actualTime => _actualTime;
+  bool get isCompleted => _actualTime != null;
   String get title => _title;
 }
 
@@ -112,7 +113,7 @@ class AssignmentTracker {
     return assignment;
   }
 
-  void addAssignment(String title, String subjectName, double estimate) {
+  Assignment addAssignment(String title, String subjectName, double estimate) {
     final key = subjectName.toLowerCase();
     final subject = _subjects.putIfAbsent(
       key,
@@ -120,6 +121,15 @@ class AssignmentTracker {
     );
     final assignment = Assignment(title, subject, estimate);
     assignments.add(assignment);
+    return assignment;
+  }
+
+  List<Assignment> get pendingAssignments =>
+      assignments.where((a) => a.actualTime == null).toList();
+
+  Assignment completePendingAssignment(Assignment assignment, double actual) {
+    assignment.complete(actual);
+    return assignment;
   }
 }
 
