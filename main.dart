@@ -33,6 +33,32 @@ void saveTracker(AssignmentTracker tracker) {
   file.writeAsStringSync(jsonEncode(tracker.toJson()), flush: true);
 }
 
+List<String>? parseSubjectsLine(String line) {
+  final subjects = line
+      .split(',')
+      .map((part) => part.trim())
+      .where((part) => part.isNotEmpty)
+      .toSet()
+      .toList();
+
+  return subjects.isEmpty ? null : subjects;
+}
+
+List<String> promptSubjects() {
+  while (true) {
+    stdout.write(
+      "Enter allowed subjects as comma-separated values (e.g. Math, English): ",
+    );
+    final input = stdin.readLineSync();
+    final subjects = input == null ? null : parseSubjectsLine(input);
+    if (subjects == null || subjects.isEmpty) {
+      print('Enter at least one valid subject.');
+      continue;
+    }
+    return subjects;
+  }
+}
+
 Map<String, Object>? parseAssignmentLine(String line) {
   final parts = line.split(',');
   if (parts.length != 3) {
@@ -67,8 +93,19 @@ double measureActualTimeMinutes() {
   return (elapsedSeconds / 60.0).abs();
 }
 
+String? normalizeSubject(String subject, List<String> allowedSubjects) {
+  final normalized = subject.trim().toLowerCase();
+  for (final allowed in allowedSubjects) {
+    if (allowed.toLowerCase() == normalized) {
+      return allowed;
+    }
+  }
+  return null;
+}
+
 void main() {
   final tracker = loadTracker();
+  final allowedSubjects = promptSubjects();
   final pendingAssignments = tracker.pendingAssignments;
 
   print('Storage file: ${stateFilePath()}');
@@ -108,9 +145,18 @@ void main() {
       continue;
     }
 
+    final normalizedSubject = normalizeSubject(
+      parsed['subject'] as String,
+      allowedSubjects,
+    );
+    if (normalizedSubject == null) {
+      print('Subject must match one of: ${allowedSubjects.join(', ')}');
+      continue;
+    }
+
     final newAssignment = tracker.addAssignment(
       parsed['title'] as String,
-      parsed['subject'] as String,
+      normalizedSubject,
       parsed['estimate'] as double,
     );
     pendingAssignments.add(newAssignment);
