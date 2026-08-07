@@ -57,6 +57,7 @@ class Assignment {
 class AssignmentTracker {
   final List<Assignment> assignments = [];
   final Map<String, Subject> _subjects = {};
+  final List<String> allowedSubjects = [];
 
   AssignmentTracker();
 
@@ -81,6 +82,21 @@ class AssignmentTracker {
 
       assignments.add(assignment);
     }
+
+    final savedSubjects = json['allowedSubjects'] as List<dynamic>?;
+    if (savedSubjects != null) {
+      for (final subject in savedSubjects) {
+        if (subject is String && subject.trim().isNotEmpty) {
+          allowedSubjects.add(subject.trim());
+        }
+      }
+    }
+
+    if (allowedSubjects.isEmpty) {
+      allowedSubjects.addAll(
+        _subjects.values.map((subject) => subject.name).toSet(),
+      );
+    }
   }
 
   Map<String, dynamic> toJson() {
@@ -93,6 +109,7 @@ class AssignmentTracker {
           'actual': a.actualTime,
         };
       }).toList(),
+      'allowedSubjects': allowedSubjects,
     };
   }
 
@@ -102,6 +119,7 @@ class AssignmentTracker {
     double estimate,
     double actual,
   ) {
+    addSubjectIfMissing(subjectName);
     final key = subjectName.toLowerCase();
     final subject = _subjects.putIfAbsent(
       key,
@@ -114,6 +132,7 @@ class AssignmentTracker {
   }
 
   Assignment addAssignment(String title, String subjectName, double estimate) {
+    addSubjectIfMissing(subjectName);
     final key = subjectName.toLowerCase();
     final subject = _subjects.putIfAbsent(
       key,
@@ -122,6 +141,25 @@ class AssignmentTracker {
     final assignment = Assignment(title, subject, estimate);
     assignments.add(assignment);
     return assignment;
+  }
+
+  void updateAllowedSubjects(List<String> subjects) {
+    allowedSubjects
+      ..clear()
+      ..addAll(subjects.where((subject) => subject.trim().isNotEmpty));
+  }
+
+  void addSubjectIfMissing(String subjectName) {
+    final normalized = subjectName.trim();
+    if (normalized.isEmpty) {
+      return;
+    }
+    final exists = allowedSubjects.any(
+      (saved) => saved.toLowerCase() == normalized.toLowerCase(),
+    );
+    if (!exists) {
+      allowedSubjects.add(normalized);
+    }
   }
 
   List<Assignment> get pendingAssignments =>

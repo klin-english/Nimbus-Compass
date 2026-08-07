@@ -105,10 +105,19 @@ String? normalizeSubject(String subject, List<String> allowedSubjects) {
 
 void main() {
   final tracker = loadTracker();
-  final allowedSubjects = promptSubjects();
+  final allowedSubjects = tracker.allowedSubjects.isNotEmpty
+      ? tracker.allowedSubjects
+      : promptSubjects();
+
+  if (tracker.allowedSubjects.isEmpty) {
+    tracker.updateAllowedSubjects(allowedSubjects);
+    saveTracker(tracker);
+  }
+
   final pendingAssignments = tracker.pendingAssignments;
 
   print('Storage file: ${stateFilePath()}');
+  print('Allowed subjects: ${allowedSubjects.join(', ')}');
   if (pendingAssignments.isNotEmpty) {
     print('Found ${pendingAssignments.length} unfinished assignment(s).');
   }
