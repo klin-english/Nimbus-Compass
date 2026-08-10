@@ -3,15 +3,15 @@ import 'dart:io';
 class Subject {
   final String _name;
   final bool _likesSubject;
-  final List<String> _assignmentTypes;
 
   double _totalEstimatedTime = 0;
   double _totalActualTime = 0;
   int _completedAssignments = 0;
 
-  Subject(this._name, this._likesSubject, this._assignmentTypes);
+  Subject(this._name, this._likesSubject);
 
   String get name => _name;
+  bool get likesSubject => _likesSubject;
 
   void recordCompletion(double estimate, double actual) {
     _totalEstimatedTime += estimate;
@@ -57,11 +57,28 @@ class Assignment {
 class AssignmentTracker {
   final List<Assignment> assignments = [];
   final Map<String, Subject> _subjects = {};
-  final List<String> allowedSubjects = [];
+  final List<Subject> allowedSubjects = [];
 
   AssignmentTracker();
 
   AssignmentTracker.fromJson(Map<String, dynamic> json) {
+    final savedSubjects = json['allowedSubjects'] as List<dynamic>?;
+    if (savedSubjects != null) {
+      for (final subject in savedSubjects) {
+        if (subject is Map<String, dynamic>) {
+          final name = (subject['name'] as String?)?.trim();
+          if (name != null && name.isNotEmpty) {
+            final likes = subject['likes'] is bool
+                ? subject['likes'] as bool
+                : true;
+            final subjectObj = Subject(name, likes);
+            allowedSubjects.add(subjectObj);
+            _subjects[name.toLowerCase()] = subjectObj;
+          }
+        }
+      }
+    }
+
     final list = json['assignments'] as List<dynamic>? ?? [];
     for (final item in list) {
       final map = Map<String, dynamic>.from(item as Map);
@@ -69,7 +86,7 @@ class AssignmentTracker {
       final subjectKey = subjectName.toLowerCase();
       final subject = _subjects.putIfAbsent(
         subjectKey,
-        () => Subject(subjectName, true, []),
+        () => Subject(subjectName, true),
       );
 
       final title = (map['title'] as String?) ?? 'Untitled';
@@ -83,19 +100,14 @@ class AssignmentTracker {
       assignments.add(assignment);
     }
 
-    final savedSubjects = json['allowedSubjects'] as List<dynamic>?;
-    if (savedSubjects != null) {
-      for (final subject in savedSubjects) {
-        if (subject is String && subject.trim().isNotEmpty) {
-          allowedSubjects.add(subject.trim());
+    if (allowedSubjects.isEmpty) {
+      final names = <String>{};
+      for (final subject in _subjects.values) {
+        if (!names.contains(subject.name.toLowerCase())) {
+          names.add(subject.name.toLowerCase());
+          allowedSubjects.add(subject);
         }
       }
-    }
-
-    if (allowedSubjects.isEmpty) {
-      allowedSubjects.addAll(
-        _subjects.values.map((subject) => subject.name).toSet(),
-      );
     }
   }
 
@@ -109,7 +121,9 @@ class AssignmentTracker {
           'actual': a.actualTime,
         };
       }).toList(),
-      'allowedSubjects': allowedSubjects,
+      'allowedSubjects': allowedSubjects.map((subject) {
+        return {'name': subject.name, 'likes': subject.likesSubject};
+      }).toList(),
     };
   }
 
@@ -119,12 +133,7 @@ class AssignmentTracker {
     double estimate,
     double actual,
   ) {
-    addSubjectIfMissing(subjectName);
-    final key = subjectName.toLowerCase();
-    final subject = _subjects.putIfAbsent(
-      key,
-      () => Subject(subjectName, true, []),
-    );
+    final subject = getOrCreateSubject(subjectName);
     final assignment = Assignment(title, subject, estimate);
     assignment.complete(actual);
     assignments.add(assignment);
@@ -132,21 +141,20 @@ class AssignmentTracker {
   }
 
   Assignment addAssignment(String title, String subjectName, double estimate) {
-    addSubjectIfMissing(subjectName);
-    final key = subjectName.toLowerCase();
-    final subject = _subjects.putIfAbsent(
-      key,
-      () => Subject(subjectName, true, []),
-    );
+    final subject = getOrCreateSubject(subjectName);
     final assignment = Assignment(title, subject, estimate);
     assignments.add(assignment);
     return assignment;
   }
 
-  void updateAllowedSubjects(List<String> subjects) {
+  void updateAllowedSubjects(List<Subject> subjects) {
     allowedSubjects
       ..clear()
-      ..addAll(subjects.where((subject) => subject.trim().isNotEmpty));
+      ..addAll(subjects.where((subject) => subject.name.trim().isNotEmpty));
+
+    for (final subject in allowedSubjects) {
+      _subjects[subject.name.toLowerCase()] = subject;
+    }
   }
 
   void addSubjectIfMissing(String subjectName) {
@@ -154,12 +162,23 @@ class AssignmentTracker {
     if (normalized.isEmpty) {
       return;
     }
+    final key = normalized.toLowerCase();
+    if (!_subjects.containsKey(key)) {
+      final subject = Subject(normalized, true);
+      _subjects[key] = subject;
+    }
     final exists = allowedSubjects.any(
-      (saved) => saved.toLowerCase() == normalized.toLowerCase(),
+      (saved) => saved.name.toLowerCase() == key,
     );
     if (!exists) {
-      allowedSubjects.add(normalized);
+      allowedSubjects.add(_subjects[key]!);
     }
+  }
+
+  Subject getOrCreateSubject(String subjectName) {
+    final normalized = subjectName.trim();
+    final key = normalized.toLowerCase();
+    return _subjects.putIfAbsent(key, () => Subject(normalized, true));
   }
 
   List<Assignment> get pendingAssignments =>

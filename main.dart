@@ -44,18 +44,40 @@ List<String>? parseSubjectsLine(String line) {
   return subjects.isEmpty ? null : subjects;
 }
 
-List<String> promptSubjects() {
+bool promptSubjectLike(String subjectName) {
+  while (true) {
+    stdout.write('Do you like "$subjectName"? (y/n): ');
+    final input = stdin.readLineSync();
+    if (input == null) {
+      continue;
+    }
+    final value = input.trim().toLowerCase();
+    if (value == 'y' || value == 'yes') {
+      return true;
+    }
+    if (value == 'n' || value == 'no') {
+      return false;
+    }
+    print('Please answer "y" or "n".');
+  }
+}
+
+List<Subject> promptSubjects() {
   while (true) {
     stdout.write(
       "Enter allowed subjects as comma-separated values (e.g. Math, English): ",
     );
     final input = stdin.readLineSync();
-    final subjects = input == null ? null : parseSubjectsLine(input);
-    if (subjects == null || subjects.isEmpty) {
+    final subjectNames = input == null ? null : parseSubjectsLine(input);
+    if (subjectNames == null || subjectNames.isEmpty) {
       print('Enter at least one valid subject.');
       continue;
     }
-    return subjects;
+
+    return subjectNames.map((subjectName) {
+      final likes = promptSubjectLike(subjectName);
+      return Subject(subjectName, likes);
+    }).toList();
   }
 }
 
@@ -93,11 +115,11 @@ double measureActualTimeMinutes() {
   return (elapsedSeconds / 60.0).abs();
 }
 
-String? normalizeSubject(String subject, List<String> allowedSubjects) {
+String? normalizeSubject(String subject, List<Subject> allowedSubjects) {
   final normalized = subject.trim().toLowerCase();
   for (final allowed in allowedSubjects) {
-    if (allowed.toLowerCase() == normalized) {
-      return allowed;
+    if (allowed.name.toLowerCase() == normalized) {
+      return allowed.name;
     }
   }
   return null;
@@ -117,7 +139,9 @@ void main() {
   final pendingAssignments = tracker.pendingAssignments;
 
   print('Storage file: ${stateFilePath()}');
-  print('Allowed subjects: ${allowedSubjects.join(', ')}');
+  print(
+    'Allowed subjects: ${allowedSubjects.map((subject) => '${subject.name} (${subject.likesSubject ? 'liked' : 'not liked'})').join(', ')}',
+  );
   if (pendingAssignments.isNotEmpty) {
     print('Found ${pendingAssignments.length} unfinished assignment(s).');
   }
@@ -159,7 +183,9 @@ void main() {
       allowedSubjects,
     );
     if (normalizedSubject == null) {
-      print('Subject must match one of: ${allowedSubjects.join(', ')}');
+      print(
+        'Subject must match one of: ${allowedSubjects.map((subject) => subject.name).join(', ')}',
+      );
       continue;
     }
 
@@ -175,8 +201,6 @@ void main() {
   for (int i = 0; i < pendingAssignments.length; i++) {
     final assignment = pendingAssignments[i];
     final title = assignment.title;
-    final estimate = assignment.estimatedTime;
-    final subjectName = assignment.subjectName;
 
     print('\nTiming assignment #${i + 1}: $title');
     final actual = measureActualTimeMinutes();
