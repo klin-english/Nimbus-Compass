@@ -39,6 +39,7 @@ class Assignment {
   double get estimatedTime => _estimatedTime;
 
   String get subjectName => _subject.name;
+  bool get likesSubject => _subject.likesSubject;
 
   double get adjustedEstimate {
     return _estimatedTime * _baselineEfficiency;
@@ -179,6 +180,38 @@ class AssignmentTracker {
     final normalized = subjectName.trim();
     final key = normalized.toLowerCase();
     return _subjects.putIfAbsent(key, () => Subject(normalized, true));
+  }
+
+  List<Assignment> scheduleAssignments(List<Assignment> pending) {
+    final liked = pending.where((assignment) => assignment.likesSubject).toList();
+    final disliked = pending.where((assignment) => !assignment.likesSubject).toList();
+
+    liked.sort((a, b) => b.estimatedTime.compareTo(a.estimatedTime));
+    disliked.sort((a, b) => b.estimatedTime.compareTo(a.estimatedTime));
+
+    final schedule = <Assignment>[];
+    var nextLike = liked.length >= disliked.length;
+    var likeIndex = 0;
+    var dislikeIndex = 0;
+
+    while (likeIndex < liked.length || dislikeIndex < disliked.length) {
+      if (nextLike) {
+        if (likeIndex < liked.length) {
+          schedule.add(liked[likeIndex++]);
+        } else if (dislikeIndex < disliked.length) {
+          schedule.add(disliked[dislikeIndex++]);
+        }
+      } else {
+        if (dislikeIndex < disliked.length) {
+          schedule.add(disliked[dislikeIndex++]);
+        } else if (likeIndex < liked.length) {
+          schedule.add(liked[likeIndex++]);
+        }
+      }
+      nextLike = !nextLike;
+    }
+
+    return schedule;
   }
 
   List<Assignment> get pendingAssignments =>

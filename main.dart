@@ -198,8 +198,10 @@ void main() {
     print('Queued assignment: ${parsed['title']}');
   }
 
-  for (int i = 0; i < pendingAssignments.length; i++) {
-    final assignment = pendingAssignments[i];
+  final scheduledAssignments = tracker.scheduleAssignments(pendingAssignments);
+
+  for (int i = 0; i < scheduledAssignments.length; i++) {
+    final assignment = scheduledAssignments[i];
     final title = assignment.title;
 
     print('\nTiming assignment #${i + 1}: $title');
