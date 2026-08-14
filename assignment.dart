@@ -31,10 +31,19 @@ class Assignment {
   final double _estimatedTime;
   final double _baselineEfficiency;
   double? _actualTime;
+  final DateTime? _dueDate;
+  final int _parts;
 
-  Assignment(this._title, this._subject, double estimatedTime)
-    : _estimatedTime = estimatedTime.abs(),
-      _baselineEfficiency = _subject.efficiencyFactor;
+  Assignment(
+    this._title,
+    this._subject,
+    double estimatedTime, [
+    DateTime? dueDate,
+    int parts = 0,
+  ]) : _estimatedTime = estimatedTime.abs(),
+       _baselineEfficiency = _subject.efficiencyFactor,
+       _dueDate = dueDate,
+       _parts = parts;
 
   double get estimatedTime => _estimatedTime;
 
@@ -53,6 +62,8 @@ class Assignment {
   double? get actualTime => _actualTime;
   bool get isCompleted => _actualTime != null;
   String get title => _title;
+  DateTime? get dueDate => _dueDate;
+  int get parts => _parts;
 }
 
 class AssignmentTracker {
@@ -92,8 +103,20 @@ class AssignmentTracker {
 
       final title = (map['title'] as String?) ?? 'Untitled';
       final estimated = (map['estimated'] as num?)?.toDouble() ?? 0.0;
+      DateTime? due;
+      if (map.containsKey('dueDate') && map['dueDate'] != null) {
+        try {
+          due = DateTime.tryParse(map['dueDate'] as String);
+        } catch (_) {
+          due = null;
+        }
+      }
 
-      final assignment = Assignment(title, subject, estimated);
+      final parts = (map['parts'] is int)
+          ? (map['parts'] as int)
+          : (map['parts'] is num ? (map['parts'] as num).toInt() : 0);
+
+      final assignment = Assignment(title, subject, estimated, due, parts);
       if (map.containsKey('actual') && map['actual'] != null) {
         assignment.complete((map['actual'] as num).toDouble());
       }
@@ -120,6 +143,8 @@ class AssignmentTracker {
           'subject': a.subjectName,
           'estimated': a.estimatedTime,
           'actual': a.actualTime,
+          'dueDate': a.dueDate?.toIso8601String(),
+          'parts': a.parts,
         };
       }).toList(),
       'allowedSubjects': allowedSubjects.map((subject) {
@@ -132,18 +157,26 @@ class AssignmentTracker {
     String title,
     String subjectName,
     double estimate,
-    double actual,
-  ) {
+    double actual, [
+    DateTime? dueDate,
+    int parts = 0,
+  ]) {
     final subject = getOrCreateSubject(subjectName);
-    final assignment = Assignment(title, subject, estimate);
+    final assignment = Assignment(title, subject, estimate, dueDate, parts);
     assignment.complete(actual);
     assignments.add(assignment);
     return assignment;
   }
 
-  Assignment addAssignment(String title, String subjectName, double estimate) {
+  Assignment addAssignment(
+    String title,
+    String subjectName,
+    double estimate, [
+    DateTime? dueDate,
+    int parts = 0,
+  ]) {
     final subject = getOrCreateSubject(subjectName);
-    final assignment = Assignment(title, subject, estimate);
+    final assignment = Assignment(title, subject, estimate, dueDate, parts);
     assignments.add(assignment);
     return assignment;
   }
@@ -176,6 +209,29 @@ class AssignmentTracker {
     }
   }
 
+  DateTime? parseFlexibleDate(String s) {
+    final t = s.trim();
+    if (t.isEmpty) return null;
+    final iso = DateTime.tryParse(t);
+    if (iso != null) return iso;
+
+    final parts = t.split('/');
+    if (parts.length == 3) {
+      final m = int.tryParse(parts[0].trim());
+      final d = int.tryParse(parts[1].trim());
+      var y = int.tryParse(parts[2].trim());
+      if (m == null || d == null || y == null) return null;
+      if (y < 100) y += 2000;
+      try {
+        return DateTime(y, m, d);
+      } catch (_) {
+        return null;
+      }
+    }
+
+    return null;
+  }
+
   Subject getOrCreateSubject(String subjectName) {
     final normalized = subjectName.trim();
     final key = normalized.toLowerCase();
@@ -183,35 +239,74 @@ class AssignmentTracker {
   }
 
   List<Assignment> scheduleAssignments(List<Assignment> pending) {
-    final liked = pending.where((assignment) => assignment.likesSubject).toList();
-    final disliked = pending.where((assignment) => !assignment.likesSubject).toList();
+    final now = DateTime.now();
+    final expanded = <Assignment>[];
 
-    liked.sort((a, b) => b.estimatedTime.compareTo(a.estimatedTime));
-    disliked.sort((a, b) => b.estimatedTime.compareTo(a.estimatedTime));
+    for (final a in pending) {
+      if (a.parts > 1 && a.dueDate != null) {
+        final parts = a.parts;
+        var totalDays = a.dueDate!.difference(now).inDays;
+        if (totalDays < 1) totalDays = 1;
 
-    final schedule = <Assignment>[];
-    var nextLike = liked.length >= disliked.length;
-    var likeIndex = 0;
-    var dislikeIndex = 0;
+        // compute base spacing; prefer at least one-day gap when there's room
+        var gapDays = totalDays ~/ parts;
+        if (gapDays < 1) gapDays = 1;
 
-    while (likeIndex < liked.length || dislikeIndex < disliked.length) {
-      if (nextLike) {
-        if (likeIndex < liked.length) {
-          schedule.add(liked[likeIndex++]);
-        } else if (dislikeIndex < disliked.length) {
-          schedule.add(disliked[dislikeIndex++]);
+        // If there's enough room to avoid consecutive-day sessions (needs 2*parts-1 days),
+        // prefer a gap of at least 2 days when base gap is 1
+        if (gapDays == 1 && totalDays >= (2 * parts - 1)) {
+          gapDays = 2;
+        }
+
+        // replace the original assignment with its parts in the tracker's list
+        try {
+          assignments.remove(a);
+        } catch (_) {}
+
+        // create part dates, ensuring each part lands on a different day
+        var lastDayOffset = 0;
+        for (var i = 0; i < parts; i++) {
+          // schedule each part at now + offset days
+          final offset = lastDayOffset + gapDays;
+          final partDue = now.add(Duration(days: offset));
+          lastDayOffset = offset;
+
+          final partTitle = '${a.title} (Part ${i + 1}/$parts)';
+          final partEst = a.estimatedTime / parts;
+          final part = addAssignment(
+            partTitle,
+            a.subjectName,
+            partEst,
+            partDue,
+            0,
+          );
+          expanded.add(part);
         }
       } else {
-        if (dislikeIndex < disliked.length) {
-          schedule.add(disliked[dislikeIndex++]);
-        } else if (likeIndex < liked.length) {
-          schedule.add(liked[likeIndex++]);
-        }
+        expanded.add(a);
       }
-      nextLike = !nextLike;
     }
 
-    return schedule;
+    expanded.sort((a, b) {
+      final aDue = a.dueDate;
+      final bDue = b.dueDate;
+      if (aDue == null && bDue == null) {
+        if (a.likesSubject != b.likesSubject) return a.likesSubject ? -1 : 1;
+        return b.estimatedTime.compareTo(a.estimatedTime);
+      } else if (aDue == null) {
+        return 1;
+      } else if (bDue == null) {
+        return -1;
+      }
+
+      final cmp = aDue.compareTo(bDue);
+      if (cmp != 0) return cmp;
+
+      if (a.likesSubject != b.likesSubject) return a.likesSubject ? -1 : 1;
+      return b.estimatedTime.compareTo(a.estimatedTime);
+    });
+
+    return expanded;
   }
 
   List<Assignment> get pendingAssignments =>
@@ -235,27 +330,27 @@ double readTimeMinutes(String prompt) {
   }
 }
 
-Map<String, Object>? parseAssignmentLine(String line) {
-  final trimmed = line.trim();
-  final firstComma = trimmed.indexOf(',');
-  final secondComma = firstComma >= 0
-      ? trimmed.indexOf(',', firstComma + 1)
-      : -1;
+Map<String, dynamic>? parseAssignmentLine(String line) {
+  final parts = line.split(',');
+  if (parts.length != 4) return null;
 
-  if (firstComma < 0 || secondComma < 0) {
-    return null;
-  }
-
-  final title = trimmed.substring(0, firstComma).trim();
-  final estimateString = trimmed.substring(firstComma + 1, secondComma).trim();
-  final subjectName = trimmed.substring(secondComma + 1).trim();
+  final title = parts[0].trim();
+  final estimateString = parts[1].trim();
+  final subjectName = parts[2].trim();
+  final dueText = parts[3].trim();
 
   final estimate = double.tryParse(estimateString);
-  if (title.isEmpty || subjectName.isEmpty || estimate == null) {
-    return null;
-  }
+  if (title.isEmpty || subjectName.isEmpty || estimate == null) return null;
 
-  return {'title': title, 'estimate': estimate.abs(), 'subject': subjectName};
+  DateTime? dueDate = parseFlexibleDate(dueText);
+  if (dueDate == null) return null;
+
+  return {
+    'title': title,
+    'estimate': estimate.abs(),
+    'subject': subjectName,
+    'dueDate': dueDate,
+  };
 }
 
 double measureActualTimeMinutes() {
@@ -269,4 +364,28 @@ double measureActualTimeMinutes() {
   final end = DateTime.now();
   final elapsedSeconds = end.difference(start).inSeconds;
   return elapsedSeconds / 60.0;
+}
+
+// Top-level flexible date parser matching the one in main.dart
+DateTime? parseFlexibleDate(String s) {
+  final t = s.trim();
+  if (t.isEmpty) return null;
+  final iso = DateTime.tryParse(t);
+  if (iso != null) return iso;
+
+  final parts = t.split('/');
+  if (parts.length == 3) {
+    final m = int.tryParse(parts[0].trim());
+    final d = int.tryParse(parts[1].trim());
+    var y = int.tryParse(parts[2].trim());
+    if (m == null || d == null || y == null) return null;
+    if (y < 100) y += 2000;
+    try {
+      return DateTime(y, m, d);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  return null;
 }

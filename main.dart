@@ -33,6 +33,30 @@ void saveTracker(AssignmentTracker tracker) {
   file.writeAsStringSync(jsonEncode(tracker.toJson()), flush: true);
 }
 
+DateTime? parseFlexibleDate(String s) {
+  final t = s.trim();
+  if (t.isEmpty) return null;
+  final iso = DateTime.tryParse(t);
+  if (iso != null) return iso;
+
+  // Accept M/D/YY or M/D/YYYY (e.g. 8/9/26 => 2026-08-09)
+  final parts = t.split('/');
+  if (parts.length == 3) {
+    final m = int.tryParse(parts[0].trim());
+    final d = int.tryParse(parts[1].trim());
+    var y = int.tryParse(parts[2].trim());
+    if (m == null || d == null || y == null) return null;
+    if (y < 100) y += 2000;
+    try {
+      return DateTime(y, m, d);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  return null;
+}
+
 List<String>? parseSubjectsLine(String line) {
   final subjects = line
       .split(',')
@@ -81,22 +105,34 @@ List<Subject> promptSubjects() {
   }
 }
 
-Map<String, Object>? parseAssignmentLine(String line) {
+Map<String, dynamic>? parseAssignmentLine(String line) {
   final parts = line.split(',');
-  if (parts.length != 3) {
+  if (parts.length != 4) {
     return null;
   }
 
   final title = parts[0].trim();
   final estimateText = parts[1].trim();
   final subjectName = parts[2].trim();
+  final dueText = parts[3].trim();
 
   final estimate = double.tryParse(estimateText);
   if (title.isEmpty || subjectName.isEmpty || estimate == null) {
     return null;
   }
 
-  return {'title': title, 'estimate': estimate.abs(), 'subject': subjectName};
+  DateTime? dueDate;
+  if (dueText.isNotEmpty) {
+    dueDate = parseFlexibleDate(dueText);
+    if (dueDate == null) return null;
+  }
+
+  return {
+    'title': title,
+    'estimate': estimate.abs(),
+    'subject': subjectName,
+    'dueDate': dueDate,
+  };
 }
 
 double measureActualTimeMinutes() {
@@ -148,7 +184,7 @@ void main() {
 
   while (true) {
     stdout.write(
-      "Enter assignment as 'Name, Time, Subject' or type 'start' or 'quit': ",
+      "Enter assignment as 'Name, Time, Subject, DueDate(YYYY-MM-DD or ISO)' or type 'start' or 'quit': ",
     );
     final input = stdin.readLineSync();
     if (input == null) {
@@ -174,7 +210,9 @@ void main() {
 
     final parsed = parseAssignmentLine(value);
     if (parsed == null) {
-      print('Invalid format. Use: Name, Time, Subject');
+      print(
+        'Invalid format. Use: Name, Time, Subject, DueDate(YYYY-MM-DD or ISO)',
+      );
       continue;
     }
 
@@ -189,16 +227,37 @@ void main() {
       continue;
     }
 
+    int parts = 0;
+    final due = parsed['dueDate'] as DateTime?;
+    if (due != null) {
+      final now = DateTime.now();
+      final diff = due.difference(now).inDays;
+      if (diff >= 3) {
+        stdout.write(
+          'Due in $diff days — split into how many parts? (blank = 0): ',
+        );
+        final pinput = stdin.readLineSync();
+        if (pinput != null && pinput.trim().isNotEmpty) {
+          final parsedInt = int.tryParse(pinput.trim());
+          if (parsedInt != null && parsedInt > 0) parts = parsedInt;
+        }
+      }
+    }
+
     final newAssignment = tracker.addAssignment(
       parsed['title'] as String,
       normalizedSubject,
       parsed['estimate'] as double,
+      parsed['dueDate'] as DateTime?,
+      parts,
     );
     pendingAssignments.add(newAssignment);
     print('Queued assignment: ${parsed['title']}');
   }
 
   final scheduledAssignments = tracker.scheduleAssignments(pendingAssignments);
+
+  exportToIcs(scheduledAssignments);
 
   for (int i = 0; i < scheduledAssignments.length; i++) {
     final assignment = scheduledAssignments[i];
@@ -227,4 +286,47 @@ void main() {
   }
 
   print('\nAll assignments completed.');
+}
+
+String _formatICalDate(DateTime dt) {
+  final u = dt.toUtc();
+  String two(int n) => n.toString().padLeft(2, '0');
+  return '${u.year}${two(u.month)}${two(u.day)}T${two(u.hour)}${two(u.minute)}${two(u.second)}Z';
+}
+
+void exportToIcs(List<Assignment> assignments) {
+  final filePath = stateFilePath();
+  final dir = File(filePath).parent.path;
+  final out = StringBuffer();
+  out.writeln('BEGIN:VCALENDAR');
+  out.writeln('VERSION:2.0');
+  out.writeln('PRODID:-//Fatigue Scheduler//EN');
+
+  for (var i = 0; i < assignments.length; i++) {
+    final a = assignments[i];
+    if (a.dueDate == null) continue;
+    final start = a.dueDate!;
+    final durationMinutes = a.estimatedTime.round();
+    final end = start.add(Duration(minutes: durationMinutes));
+    final uid = 'assign-${i}-${start.millisecondsSinceEpoch}@fatigue-scheduler';
+
+    out.writeln('BEGIN:VEVENT');
+    out.writeln('UID:$uid');
+    out.writeln('DTSTAMP:${_formatICalDate(DateTime.now())}');
+    out.writeln('DTSTART:${_formatICalDate(start)}');
+    out.writeln('DTEND:${_formatICalDate(end)}');
+    out.writeln('SUMMARY:${a.title}');
+    out.writeln('DESCRIPTION:Subject=${a.subjectName}');
+    out.writeln('END:VEVENT');
+  }
+
+  out.writeln('END:VCALENDAR');
+
+  final file = File('$dir/assignments_calendar.ics');
+  try {
+    file.writeAsStringSync(out.toString(), flush: true);
+    print('Exported calendar to ${file.path}');
+  } catch (e) {
+    print('Failed to write calendar file: $e');
+  }
 }
