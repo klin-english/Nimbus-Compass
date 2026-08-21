@@ -161,7 +161,7 @@ String? normalizeSubject(String subject, List<Subject> allowedSubjects) {
   return null;
 }
 
-void main() {
+void cliMain() {
   final tracker = loadTracker();
   final allowedSubjects = tracker.allowedSubjects.isNotEmpty
       ? tracker.allowedSubjects
@@ -321,4 +321,52 @@ void exportToIcs(List<Assignment> assignments) {
   } catch (e) {
     print('Failed to write calendar file: $e');
   }
+}
+
+Future<void> main(List<String> args) async {
+  if (args.contains('--cli')) {
+    cliMain();
+    return;
+  }
+
+  final tracker = loadTracker();
+  final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+  final url = 'http://localhost:${server.port}';
+
+  server.listen((request) {
+    request.response
+      ..headers.contentType = ContentType.html
+      ..write(phoneAppHtml(tracker.toJson()))
+      ..close();
+  });
+
+  print('Nimbus Compass is running at $url');
+  try {
+    await Process.run('open', ['-a', 'Google Chrome', url]);
+  } catch (_) {
+    print('Open $url in Chrome.');
+  }
+}
+
+String phoneAppHtml(Map<String, dynamic> state) {
+  final encodedState = jsonEncode(state).replaceAll('<', r'\u003c');
+  return '''<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Nimbus Compass</title>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&display=swap');
+:root{--ink:#182334;--muted:#758196;--blue:#4777ee;--pale:#edf3ff;--mint:#d9f5ed;--coral:#ff876e;--line:#e9edf3;--paper:#fbfcff}
+*{box-sizing:border-box}body{margin:0;min-height:100vh;background:radial-gradient(circle at 20% 10%,#dce8ff 0,transparent 32%),linear-gradient(135deg,#eaf0fa,#f8efe8);font-family:'DM Sans',sans-serif;color:var(--ink);display:grid;place-items:center;padding:32px}
+.phone{width:min(100%,390px);height:min(820px,calc(100vh - 40px));min-height:680px;background:var(--paper);border:9px solid #141c2c;border-radius:42px;box-shadow:0 26px 70px #34415c38,0 0 0 2px #fff;overflow:hidden;position:relative}
+.phone:before{content:'';position:absolute;z-index:5;top:8px;left:50%;transform:translateX(-50%);width:92px;height:22px;border-radius:0 0 16px 16px;background:#141c2c}.screen{height:100%;overflow:auto;padding:38px 21px 22px;scrollbar-width:none}.screen::-webkit-scrollbar{display:none}
+.status{display:flex;justify-content:space-between;font-size:11px;font-weight:700;margin:0 3px 19px}.top{display:flex;justify-content:space-between;align-items:center;margin-bottom:22px}.eyebrow{font-size:12px;color:var(--muted);font-weight:600}.brand{font:700 25px 'Space Grotesk';letter-spacing:-.8px;margin-top:3px}.avatar{width:39px;height:39px;border-radius:50%;background:#ffcdb8;display:grid;place-items:center;font-weight:700;color:#a14d3b}.hero{background:linear-gradient(135deg,#4b7bf1,#6f95f7);border-radius:24px;padding:21px;color:white;position:relative;overflow:hidden;box-shadow:0 12px 24px #4777ee31}.hero:after{content:'';position:absolute;width:145px;height:145px;border:22px solid #ffffff20;border-radius:50%;right:-42px;top:-48px}.hero h1{font:600 21px 'Space Grotesk';margin:0 0 8px}.hero p{font-size:13px;line-height:1.5;margin:0;width:73%;color:#e9efff}.progress{margin-top:19px;background:#ffffff35;height:7px;border-radius:8px;overflow:hidden}.progress i{display:block;width:64%;height:100%;background:white;border-radius:8px}.hero small{display:block;margin-top:8px;color:#dbe5ff;font-size:11px}.section-head{display:flex;justify-content:space-between;align-items:center;margin:25px 2px 13px}.section-head h2{font:600 17px 'Space Grotesk';margin:0}.section-head span{color:var(--blue);font-size:12px;font-weight:700}.task{display:flex;gap:12px;padding:14px 12px;background:white;border:1px solid var(--line);border-radius:17px;margin-bottom:10px;box-shadow:0 4px 12px #384b7410}.dot{width:11px;height:11px;border-radius:50%;background:var(--coral);margin-top:4px;flex:none}.dot.green{background:#53c59f}.task h3{font-size:14px;margin:0 0 5px}.task p{margin:0;color:var(--muted);font-size:11px}.time{margin-left:auto;white-space:nowrap;font-size:11px;color:var(--muted);font-weight:600}.week{display:grid;grid-template-columns:repeat(7,1fr);gap:6px}.day{height:54px;border-radius:13px;background:#f4f6fa;text-align:center;padding-top:8px;font-size:10px;color:var(--muted)}.day b{display:block;color:var(--ink);font-size:15px;margin-top:5px}.day.active{background:var(--ink);color:white}.day.active b{color:white}.bottom{display:grid;grid-template-columns:repeat(4,1fr);gap:4px;background:white;border-top:1px solid var(--line);padding:13px 4px 4px;margin:23px -21px -22px;position:sticky;bottom:-22px}.nav{border:0;background:transparent;color:#9aa5b7;font:600 10px 'DM Sans';display:grid;gap:5px;justify-items:center;padding:5px;cursor:pointer}.nav .ico{font-size:19px;line-height:1}.nav.selected{color:var(--blue)}.add{position:absolute;right:23px;bottom:74px;width:52px;height:52px;border:0;border-radius:18px;background:var(--coral);color:white;font-size:27px;box-shadow:0 10px 20px #ff876e55;cursor:pointer}.fade{animation:rise .65s both}@keyframes rise{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:none}}
+</style></head><body><main class="phone"><section class="screen"><div class="status"><span>9:41</span><span>● ● ▰</span></div><div class="top"><div><div class="eyebrow">Thursday, August 20</div><div class="brand">Nimbus Compass</div></div><div class="avatar">KL</div></div><article class="hero fade"><h1>Keep your momentum.</h1><p>A calmer study plan, built around your energy and your deadlines.</p><div class="progress"><i></i></div><small>3 of 5 focus sessions completed</small></article><div class="section-head"><h2>This week</h2><span>August 2026</span></div><div class="week fade"><div class="day"><span>Mon</span><b>17</b></div><div class="day"><span>Tue</span><b>18</b></div><div class="day"><span>Wed</span><b>19</b></div><div class="day active"><span>Thu</span><b>20</b></div><div class="day"><span>Fri</span><b>21</b></div><div class="day"><span>Sat</span><b>22</b></div><div class="day"><span>Sun</span><b>23</b></div></div><div class="section-head"><h2>Today</h2><span>View calendar</span></div><div id="tasks"><div class="task fade"><span class="dot"></span><div><h3>Research outline</h3><p>History · Focus session</p></div><span class="time">10:00</span></div><div class="task fade"><span class="dot green"></span><div><h3>Read chapter 4</h3><p>English · 45 min</p></div><span class="time">2:30</span></div></div><button class="add" aria-label="Add assignment">+</button><nav class="bottom"><button class="nav selected"><span class="ico">⌂</span>Today</button><button class="nav"><span class="ico">▦</span>Calendar</button><button class="nav"><span class="ico">◷</span>Focus</button><button class="nav"><span class="ico">◌</span>Profile</button></nav></section></main><script>
+const state=$encodedState;
+const tasks=document.getElementById('tasks');
+const saved=(state.assignments||[]).filter(a=>!a.actual).slice(0,3);
+saved.forEach((a,i)=>{const row=document.createElement('div');row.className='task fade';row.style.animationDelay=(i*80)+'ms';row.innerHTML='<span class="dot"></span><div><h3>'+escapeHtml(a.title||'Assignment')+'</h3><p>'+escapeHtml(a.subject||'Study')+' · '+Math.round(a.estimated||0)+' min</p></div><span class="time">'+(a.dueDate?formatDate(a.dueDate):'Soon')+'</span>';tasks.appendChild(row)});
+function escapeHtml(v){return String(v).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[c]))}function formatDate(v){const d=new Date(v);return (d.getMonth()+1)+'/'+d.getDate()}
+</script></body></html>''';
 }
