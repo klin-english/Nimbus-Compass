@@ -45,14 +45,14 @@ class Assignment {
        _dueDate = dueDate,
        _parts = parts;
 
+  double get adjustedEstimate {
+    return _estimatedTime * _baselineEfficiency;
+  }
+
   double get estimatedTime => _estimatedTime;
 
   String get subjectName => _subject.name;
   bool get likesSubject => _subject.likesSubject;
-
-  double get adjustedEstimate {
-    return _estimatedTime * _baselineEfficiency;
-  }
 
   void complete(double actual) {
     _actualTime = actual.abs();
@@ -265,14 +265,23 @@ class AssignmentTracker {
 
         // create part dates, ensuring each part lands on a different day
         var lastDayOffset = 0;
+        // compute integer-minute durations for parts that sum to original estimate
+        final totalMinutes = a.estimatedTime.round();
+        final base = totalMinutes ~/ parts;
+        var remainder = totalMinutes % parts;
         for (var i = 0; i < parts; i++) {
-          // schedule each part at now + offset days
           final offset = lastDayOffset + gapDays;
           final partDue = now.add(Duration(days: offset));
           lastDayOffset = offset;
 
+          var partMinutes = base;
+          if (remainder > 0) {
+            partMinutes += 1;
+            remainder -= 1;
+          }
+
           final partTitle = '${a.title} (Part ${i + 1}/$parts)';
-          final partEst = a.estimatedTime / parts;
+          final partEst = partMinutes.toDouble();
           final part = addAssignment(
             partTitle,
             a.subjectName,

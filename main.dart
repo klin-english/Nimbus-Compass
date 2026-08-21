@@ -227,21 +227,13 @@ void main() {
       continue;
     }
 
+    // Compute default parts: split into ~45-minute parts if estimated >= 90 minutes
     int parts = 0;
-    final due = parsed['dueDate'] as DateTime?;
-    if (due != null) {
-      final now = DateTime.now();
-      final diff = due.difference(now).inDays;
-      if (diff >= 3) {
-        stdout.write(
-          'Due in $diff days — split into how many parts? (blank = 0): ',
-        );
-        final pinput = stdin.readLineSync();
-        if (pinput != null && pinput.trim().isNotEmpty) {
-          final parsedInt = int.tryParse(pinput.trim());
-          if (parsedInt != null && parsedInt > 0) parts = parsedInt;
-        }
-      }
+    final est = (parsed['estimate'] as double).abs();
+    if (est >= 90.0) {
+      final ratio = est / 45.0;
+      parts = ratio.round();
+      if (parts < 2) parts = 2;
     }
 
     final newAssignment = tracker.addAssignment(
