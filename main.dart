@@ -345,7 +345,10 @@ Future<void> main(List<String> args) async {
       final title = data['title'] ?? 'Assignment';
       final subject = data['subject'] ?? 'Study';
       final estimated = double.tryParse(data['estimated'] ?? '0') ?? 0;
-      tracker.addAssignment(title, subject, estimated);
+      final dueDate = data['dueDate'] == null || data['dueDate']!.isEmpty
+          ? null
+          : DateTime.tryParse(data['dueDate']!);
+      tracker.addAssignment(title, subject, estimated, dueDate);
       saveTracker(tracker);
       exportToIcs(tracker.pendingAssignments);
       request.response
@@ -384,6 +387,14 @@ String phoneAppHtml(Map<String, dynamic> state) {
 <style>.day-header{height:20px;text-align:center;font-size:10px;font-weight:700;color:var(--muted)}.calendar-day{height:62px;padding:7px 3px;overflow:hidden}.calendar-day span{display:block;font-weight:700;color:var(--ink)}.calendar-day small{display:block;margin-top:4px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;font-size:8px;color:var(--blue)}.calendar-day.has-event{background:var(--pale)}.calendar-day.active{background:var(--ink)}.calendar-day.active span,.calendar-day.active small{color:white}.blank{visibility:hidden}</style></head><body><main class="phone"><section class="screen"><div class="status"><span>9:41</span><span>● ● ▰</span></div><div class="top"><div><div class="eyebrow">Thursday, August 20</div><div class="brand">Nimbus Compass</div></div><div class="avatar">KL</div></div><article class="hero fade"><h1>Keep your momentum.</h1><p>A calmer study plan, built around your energy and your deadlines.</p><div class="progress"><i></i></div><small>3 of 5 focus sessions completed</small></article><div class="section-head"><h2>This week</h2><span>August 2026</span></div><div class="week fade" id="calendarGrid"></div><div class="section-head"><h2>Today</h2><span>View calendar</span></div><div id="tasks"></div><button class="add" aria-label="Add assignment" id="addBtn">+</button><div class="modal" id="addModal"><div class="modal-box"><h2>New Assignment</h2><input type="text" id="titleInput" placeholder="Assignment name" autocomplete="off"><input type="text" id="subjectInput" placeholder="Subject" autocomplete="off"><input type="number" id="timeInput" placeholder="Time (minutes)" min="0" autocomplete="off"><div class="modal-buttons"><button class="btn-cancel" id="cancelBtn">Cancel</button><button class="btn-add" id="submitBtn">Add</button></div></div></div><nav class="bottom"><button class="nav selected"><span class="ico">⌂</span>Today</button><button class="nav"><span class="ico">▦</span>Calendar</button><button class="nav"><span class="ico">◷</span>Focus</button><button class="nav"><span class="ico">◌</span>Profile</button></nav></section></main><script>
 const state=$encodedState;
 const tasks=document.getElementById('tasks');
+const prioritiesHeading=[...document.querySelectorAll('.section-head h2')].find(item=>item.textContent.trim()==='Today');
+if(prioritiesHeading) prioritiesHeading.textContent='Priorities';
+const workListHeading=document.createElement('div');
+workListHeading.className='section-head';
+workListHeading.innerHTML='<h2>Work List</h2>';
+const workTasks=document.createElement('div');
+workTasks.id='workTasks';
+tasks.after(workListHeading,workTasks);
 const modal=document.getElementById('addModal');
 const addBtn=document.getElementById('addBtn');
 const cancelBtn=document.getElementById('cancelBtn');
@@ -391,21 +402,42 @@ const submitBtn=document.getElementById('submitBtn');
 const titleInput=document.getElementById('titleInput');
 const subjectInput=document.getElementById('subjectInput');
 const timeInput=document.getElementById('timeInput');
+const dueDateInput=document.createElement('input');
+dueDateInput.type='date';
+dueDateInput.id='dueDateInput';
+dueDateInput.setAttribute('aria-label','Due date');
+timeInput.insertAdjacentElement('afterend',dueDateInput);
+submitBtn.addEventListener('click',async()=>{const title=titleInput.value.trim();const subject=subjectInput.value.trim();const estimated=timeInput.value.trim();const dueDate=dueDateInput.value;if(!title||!subject||!estimated||!dueDate){alert('Please fill in all fields');return}const params=new URLSearchParams({title,subject,estimated,dueDate});try{const res=await fetch('/add',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:params});if(res.ok){modal.classList.remove('open');titleInput.value='';subjectInput.value='';timeInput.value='';dueDateInput.value='';location.reload()}}catch(e){alert('Error adding assignment')}});
 const calendarGrid=document.getElementById('calendarGrid');
-const todayContent=[...document.querySelectorAll('.top,.hero,.section-head,#tasks')];
+const sectionHeads=[...document.querySelectorAll('.section-head')];
+const homeContent=[...document.querySelectorAll('.top,.hero,#tasks,#workTasks'),sectionHeads[1],workListHeading];
+const calendarContent=[sectionHeads[0],calendarGrid];
 const addButton=document.getElementById('addBtn');
+calendarContent.forEach(item=>item.hidden=true);
 document.querySelectorAll('.nav').forEach(nav=>nav.addEventListener('click',()=>{
   const label=nav.textContent.trim();
   const isToday=label.includes('Today');
   const isCalendar=label.includes('Calendar');
   document.querySelectorAll('.nav').forEach(item=>item.classList.remove('selected'));
   nav.classList.add('selected');
-  todayContent.forEach(item=>item.hidden=!isToday);
-  calendarGrid.hidden=!isCalendar && !isToday;
+  homeContent.forEach(item=>item.hidden=!isToday);
+  calendarContent.forEach(item=>item.hidden=!isCalendar);
   addButton.hidden=!isToday;
 }));
-const saved=(state.assignments||[]).filter(a=>!a.actual).slice(0,3);
-saved.forEach((a,i)=>{const row=document.createElement('div');row.className='task fade';row.style.animationDelay=(i*80)+'ms';row.innerHTML='<span class="dot"></span><div><h3>'+escapeHtml(a.title||'Assignment')+'</h3><p>'+escapeHtml(a.subject||'Study')+' · '+Math.round(a.estimated||0)+' min</p></div><span class="time">'+(a.dueDate?formatDate(a.dueDate):'Soon')+'</span>';tasks.appendChild(row)});
+const saved=(state.assignments||[]).filter(a=>!a.actual);
+const now=new Date();
+const priorities=[];
+const workList=[];
+saved.forEach(a=>{
+  const due=a.dueDate?new Date(a.dueDate):null;
+  const daysAway=due?(due-now)/86400000:Infinity;
+  const isPart=(a.title||'').includes('(Part ');
+  const isPriority=(daysAway<=7)||(!isPart&&Number(a.estimated||0)>=90);
+  (isPriority?priorities:workList).push(a);
+});
+function renderTasks(list,target){list.forEach((a,i)=>{const row=document.createElement('div');row.className='task fade';row.style.animationDelay=(i*80)+'ms';row.innerHTML='<span class="dot"></span><div><h3>'+escapeHtml(a.title||'Assignment')+'</h3><p>'+escapeHtml(a.subject||'Study')+' · '+Math.round(a.estimated||0)+' min</p></div><span class="time">'+(a.dueDate?formatDate(a.dueDate):'Soon')+'</span>';target.appendChild(row)})}
+renderTasks(priorities,tasks);
+renderTasks(workList,workTasks);
 const calendarDate=new Date();
 function renderCalendar(){
   const year=calendarDate.getFullYear(), month=calendarDate.getMonth();
@@ -427,7 +459,6 @@ function renderCalendar(){
 renderCalendar();
 addBtn.addEventListener('click',()=>modal.classList.add('open'));
 cancelBtn.addEventListener('click',()=>{modal.classList.remove('open');titleInput.value='';subjectInput.value='';timeInput.value=''});
-submitBtn.addEventListener('click',async()=>{const title=titleInput.value.trim();const subject=subjectInput.value.trim();const estimated=timeInput.value.trim();if(!title||!subject||!estimated){alert('Please fill in all fields');return}const params=new URLSearchParams({title,subject,estimated});try{const res=await fetch('/add',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:params});if(res.ok){modal.classList.remove('open');titleInput.value='';subjectInput.value='';timeInput.value='';location.reload()}}catch(e){alert('Error adding assignment')}});
 function escapeHtml(v){return String(v).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[c]))}function formatDate(v){const d=new Date(v);return (d.getMonth()+1)+'/'+d.getDate()}
 </script></body></html>''';
 }
