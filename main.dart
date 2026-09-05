@@ -379,6 +379,45 @@ Future<void> main(List<String> args) async {
         ..headers.contentType = ContentType.json
         ..write('{"ok":true}')
         ..close();
+    } else if (request.method == 'POST' &&
+        request.uri.path == '/delete-subject') {
+      final body = await utf8.decoder.bind(request).join();
+      final data = Uri.parse('?$body').queryParameters;
+      final subjectName = (data['subject'] ?? '').trim();
+      final subjectKey = subjectName.toLowerCase();
+      final subjectExists = tracker.allowedSubjects.any(
+        (subject) => subject.name.toLowerCase() == subjectKey,
+      );
+
+      if (!subjectExists) {
+        request.response
+          ..statusCode = 404
+          ..headers.contentType = ContentType.json
+          ..write('{"ok":false,"error":"Subject not found"}')
+          ..close();
+        return;
+      }
+
+      final remainingSubjects = tracker.allowedSubjects
+          .where((subject) => subject.name.toLowerCase() != subjectKey)
+          .toList();
+      final assignmentsRemoved = tracker.assignments
+          .where(
+            (assignment) => assignment.subjectName.toLowerCase() == subjectKey,
+          )
+          .length;
+      tracker.assignments.removeWhere(
+        (assignment) => assignment.subjectName.toLowerCase() == subjectKey,
+      );
+      tracker.updateAllowedSubjects(remainingSubjects);
+      saveTracker(tracker);
+      exportToIcs(tracker.pendingAssignments);
+      request.response
+        ..headers.contentType = ContentType.json
+        ..write(
+          jsonEncode({'ok': true, 'assignmentsRemoved': assignmentsRemoved}),
+        )
+        ..close();
     } else if (request.method == 'POST' && request.uri.path == '/add') {
       final body = await utf8.decoder.bind(request).join();
       final data = Uri.parse('?$body').queryParameters;
@@ -559,8 +598,19 @@ profileSubjectsHeading.className='section-head';
 profileSubjectsHeading.innerHTML='<h2>Subjects</h2>';
 const profileSubjects=document.createElement('div');
 profileSubjects.id='profileSubjects';
-profileSubjects.innerHTML=(state.allowedSubjects||[]).map(subject=>'<div class="task"><span class="dot '+(subject.likes?'green':'')+'"></span><div><h3>'+escapeHtml(subject.name)+'</h3><p>'+(subject.likes?'Like':'Dislike')+'</p></div></div>').join('');
+profileSubjects.innerHTML='<p style="color:#c84f45;font:12px DM Sans;margin:0 0 12px">Deleting a subject also deletes every assignment with that subject.</p>'+(state.allowedSubjects||[]).map(subject=>'<div class="task"><span class="dot '+(subject.likes?'green':'')+'"></span><div><h3>'+escapeHtml(subject.name)+'</h3><p>'+(subject.likes?'Like':'Dislike')+'</p></div><button class="delete-subject" data-subject="'+escapeHtml(subject.name)+'" style="margin-left:auto;border:0;border-radius:9px;background:#fff0ee;color:#c84f45;font:600 11px DM Sans;padding:7px 9px;cursor:pointer">Delete</button></div>').join('');
 workTasks.after(profileSubjectsHeading,profileSubjects);
+document.querySelectorAll('.delete-subject').forEach(button=>button.addEventListener('click',async()=>{
+  const subject=button.dataset.subject;
+  if(!confirm('Delete '+subject+' and all assignments with this subject?'))return;
+  button.disabled=true;
+  try{
+    const response=await fetch('/delete-subject',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:new URLSearchParams({subject})});
+    const result=await response.json();
+    if(!response.ok||!result.ok)throw new Error(result.error||'Could not delete subject');
+    location.reload();
+  }catch(error){alert(error.message);button.disabled=false}
+}));
 const modal=document.getElementById('addModal');
 const addBtn=document.getElementById('addBtn');
 const cancelBtn=document.getElementById('cancelBtn');
