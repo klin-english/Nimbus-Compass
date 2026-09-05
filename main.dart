@@ -330,6 +330,7 @@ Future<void> main(List<String> args) async {
   }
 
   final tracker = loadTracker();
+  final activeTimers = <String, DateTime>{};
   final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
   final url = 'http://localhost:${server.port}';
 
@@ -356,6 +357,57 @@ Future<void> main(List<String> args) async {
         ..headers.contentType = ContentType.json
         ..write('{"ok":true}')
         ..close();
+    } else if (request.method == 'POST' &&
+        (request.uri.path == '/start' || request.uri.path == '/stop')) {
+      final body = await utf8.decoder.bind(request).join();
+      final data = Uri.parse('?$body').queryParameters;
+      final title = data['title'] ?? '';
+      final dueDate = data['dueDate'] ?? '';
+      final key = '$title|$dueDate';
+      final assignment = tracker.assignments.cast<Assignment?>().firstWhere(
+        (item) =>
+            item!.actualTime == null &&
+            item.title == title &&
+            (item.dueDate?.toIso8601String() ?? '') == dueDate,
+        orElse: () => null,
+      );
+
+      if (assignment == null) {
+        request.response
+          ..statusCode = 404
+          ..headers.contentType = ContentType.json
+          ..write('{"ok":false,"error":"Assignment not found"}')
+          ..close();
+        return;
+      }
+
+      if (request.uri.path == '/start') {
+        activeTimers[key] = DateTime.now();
+        request.response
+          ..headers.contentType = ContentType.json
+          ..write('{"ok":true}')
+          ..close();
+      } else {
+        final started = activeTimers.remove(key);
+        if (started == null) {
+          request.response
+            ..statusCode = 400
+            ..headers.contentType = ContentType.json
+            ..write('{"ok":false,"error":"Timer was not started"}')
+            ..close();
+          return;
+        }
+        final elapsedMinutes =
+            DateTime.now().difference(started).inSeconds / 60.0;
+        tracker.completePendingAssignment(assignment, elapsedMinutes);
+        tracker.assignments.remove(assignment);
+        saveTracker(tracker);
+        exportToIcs(tracker.pendingAssignments);
+        request.response
+          ..headers.contentType = ContentType.json
+          ..write(jsonEncode({'ok': true, 'actual': elapsedMinutes}))
+          ..close();
+      }
     } else {
       request.response.statusCode = 404;
       request.response.close();
@@ -435,9 +487,24 @@ saved.forEach(a=>{
   const isPriority=(daysAway<=7)||(!isPart&&Number(a.estimated||0)>=90);
   (isPriority?priorities:workList).push(a);
 });
-function renderTasks(list,target){list.forEach((a,i)=>{const row=document.createElement('div');row.className='task fade';row.style.animationDelay=(i*80)+'ms';row.innerHTML='<span class="dot"></span><div><h3>'+escapeHtml(a.title||'Assignment')+'</h3><p>'+escapeHtml(a.subject||'Study')+' · '+Math.round(a.estimated||0)+' min</p></div><span class="time">'+(a.dueDate?formatDate(a.dueDate):'Soon')+'</span>';target.appendChild(row)})}
+function renderTasks(list,target){list.forEach((a,i)=>{const row=document.createElement('div');row.className='task fade';row.style.animationDelay=(i*80)+'ms';row.innerHTML='<span class="dot"></span><div><h3>'+escapeHtml(a.title||'Assignment')+'</h3><p>'+escapeHtml(a.subject||'Study')+' · '+Math.round(a.estimated||0)+' min</p></div><span class="time">'+(a.dueDate?formatDate(a.dueDate):'Soon')+'</span><button class="start-task" data-title="'+escapeHtml(a.title||'Assignment')+'" data-due="'+escapeHtml(a.dueDate||'')+'">Start</button>';target.appendChild(row)})}
 renderTasks(priorities,tasks);
 renderTasks(workList,workTasks);
+document.querySelectorAll('.start-task').forEach(button=>button.addEventListener('click',async()=>{
+  const running=button.dataset.running==='true';
+  const endpoint=running?'/stop':'/start';
+  button.disabled=true;
+  const body=new URLSearchParams({title:button.dataset.title,dueDate:button.dataset.due||''});
+  try{
+    const response=await fetch(endpoint,{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body});
+    const result=await response.json();
+    if(!response.ok||!result.ok) throw new Error(result.error||'Timer request failed');
+    if(running){location.reload();return}
+    button.dataset.running='true';
+    button.textContent='Stop';
+    button.disabled=false;
+  }catch(error){alert(error.message);button.disabled=false}
+}));
 const calendarDate=new Date();
 function renderCalendar(){
   const year=calendarDate.getFullYear(), month=calendarDate.getMonth();
