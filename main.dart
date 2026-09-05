@@ -340,12 +340,57 @@ Future<void> main(List<String> args) async {
         ..headers.contentType = ContentType.html
         ..write(phoneAppHtml(tracker.toJson()))
         ..close();
+    } else if (request.method == 'POST' && request.uri.path == '/subjects') {
+      final body = await utf8.decoder.bind(request).join();
+      final data = Uri.parse('?$body').queryParameters;
+      final likedNames = (data['likes'] ?? '')
+          .split(',')
+          .map((name) => name.trim())
+          .where((name) => name.isNotEmpty)
+          .toSet()
+          .toList();
+      final dislikedNames = (data['dislikes'] ?? '')
+          .split(',')
+          .map((name) => name.trim())
+          .where((name) => name.isNotEmpty)
+          .toSet()
+          .toList();
+
+      if (likedNames.isEmpty && dislikedNames.isEmpty) {
+        request.response
+          ..statusCode = 400
+          ..headers.contentType = ContentType.json
+          ..write('{"ok":false,"error":"Enter at least one subject"}')
+          ..close();
+        return;
+      }
+
+      tracker.updateAllowedSubjects([
+        ...likedNames.map((name) => Subject(name, true)),
+        ...dislikedNames.map((name) => Subject(name, false)),
+      ]);
+      saveTracker(tracker);
+      request.response
+        ..headers.contentType = ContentType.json
+        ..write('{"ok":true}')
+        ..close();
     } else if (request.method == 'POST' && request.uri.path == '/add') {
       final body = await utf8.decoder.bind(request).join();
       final data = Uri.parse('?$body').queryParameters;
       final title = data['title'] ?? 'Assignment';
       final subject = data['subject'] ?? 'Study';
       final estimated = double.tryParse(data['estimated'] ?? '0') ?? 0;
+      final subjectExists = tracker.allowedSubjects.any(
+        (saved) => saved.name.toLowerCase() == subject.trim().toLowerCase(),
+      );
+      if (!subjectExists) {
+        request.response
+          ..statusCode = 400
+          ..headers.contentType = ContentType.json
+          ..write('{"ok":false,"error":"Subject does not exist"}')
+          ..close();
+        return;
+      }
       final dueDate = data['dueDate'] == null || data['dueDate']!.isEmpty
           ? null
           : DateTime.tryParse(data['dueDate']!);
@@ -438,6 +483,28 @@ String phoneAppHtml(Map<String, dynamic> state) {
 .status{display:flex;justify-content:space-between;font-size:11px;font-weight:700;margin:0 3px 19px}.top{display:flex;justify-content:space-between;align-items:center;margin-bottom:22px}.eyebrow{font-size:12px;color:var(--muted);font-weight:600}.brand{font:700 25px 'Space Grotesk';letter-spacing:-.8px;margin-top:3px}.avatar{width:39px;height:39px;border-radius:50%;background:#ffcdb8;display:grid;place-items:center;font-weight:700;color:#a14d3b}.hero{background:linear-gradient(135deg,#4b7bf1,#6f95f7);border-radius:24px;padding:21px;color:white;position:relative;overflow:hidden;box-shadow:0 12px 24px #4777ee31}.hero:after{content:'';position:absolute;width:145px;height:145px;border:22px solid #ffffff20;border-radius:50%;right:-42px;top:-48px}.hero h1{font:600 21px 'Space Grotesk';margin:0 0 8px}.hero p{font-size:13px;line-height:1.5;margin:0;width:73%;color:#e9efff}.progress{margin-top:19px;background:#ffffff35;height:7px;border-radius:8px;overflow:hidden}.progress i{display:block;width:64%;height:100%;background:white;border-radius:8px}.hero small{display:block;margin-top:8px;color:#dbe5ff;font-size:11px}.section-head{display:flex;justify-content:space-between;align-items:center;margin:25px 2px 13px}.section-head h2{font:600 17px 'Space Grotesk';margin:0}.section-head span{color:var(--blue);font-size:12px;font-weight:700}.task{display:flex;gap:12px;padding:14px 12px;background:white;border:1px solid var(--line);border-radius:17px;margin-bottom:10px;box-shadow:0 4px 12px #384b7410}.dot{width:11px;height:11px;border-radius:50%;background:var(--coral);margin-top:4px;flex:none}.dot.green{background:#53c59f}.task h3{font-size:14px;margin:0 0 5px}.task p{margin:0;color:var(--muted);font-size:11px}.time{margin-left:auto;white-space:nowrap;font-size:11px;color:var(--muted);font-weight:600}.week{display:grid;grid-template-columns:repeat(7,1fr);gap:6px}.day{height:54px;border-radius:13px;background:#f4f6fa;text-align:center;padding-top:8px;font-size:10px;color:var(--muted)}.day b{display:block;color:var(--ink);font-size:15px;margin-top:5px}.day.active{background:var(--ink);color:white}.day.active b{color:white}.bottom{display:grid;grid-template-columns:repeat(4,1fr);gap:4px;background:white;border-top:1px solid var(--line);padding:13px 4px 4px;margin:23px -21px -22px;position:sticky;bottom:-22px}.nav{border:0;background:transparent;color:#9aa5b7;font:600 10px 'DM Sans';display:grid;gap:5px;justify-items:center;padding:5px;cursor:pointer}.nav .ico{font-size:19px;line-height:1}.nav.selected{color:var(--blue)}.add{position:absolute;right:23px;bottom:74px;width:52px;height:52px;border:0;border-radius:18px;background:var(--coral);color:white;font-size:27px;box-shadow:0 10px 20px #ff876e55;cursor:pointer}.fade{animation:rise .65s both}@keyframes rise{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:none}}.modal{display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.4);z-index:100;align-items:center;justify-content:center}.modal.open{display:flex}.modal-box{background:var(--paper);border-radius:24px;padding:24px;width:min(340px,90%);box-shadow:0 20px 60px rgba(0,0,0,.3)}.modal h2{font:600 18px 'Space Grotesk';margin:0 0 18px}.modal input{width:100%;padding:11px 13px;margin-bottom:12px;border:1px solid var(--line);border-radius:12px;font:14px 'DM Sans';color:var(--ink)}.modal input:focus{outline:none;border-color:var(--blue)}.modal-buttons{display:flex;gap:10px}.modal-buttons button{flex:1;padding:11px;border:1px solid var(--line);border-radius:10px;font:600 13px 'DM Sans';cursor:pointer}.modal-buttons .btn-cancel{background:white;color:var(--ink)}.modal-buttons .btn-add{background:var(--coral);border-color:var(--coral);color:white}
 <style>.day-header{height:20px;text-align:center;font-size:10px;font-weight:700;color:var(--muted)}.calendar-day{height:62px;padding:7px 3px;overflow:hidden}.calendar-day span{display:block;font-weight:700;color:var(--ink)}.calendar-day small{display:block;margin-top:4px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;font-size:8px;color:var(--blue)}.calendar-day.has-event{background:var(--pale)}.calendar-day.active{background:var(--ink)}.calendar-day.active span,.calendar-day.active small{color:white}.blank{visibility:hidden}</style></head><body><main class="phone"><section class="screen"><div class="status"><span>9:41</span><span>● ● ▰</span></div><div class="top"><div><div class="eyebrow">Thursday, August 20</div><div class="brand">Nimbus Compass</div></div><div class="avatar">KL</div></div><article class="hero fade"><h1>Keep your momentum.</h1><p>A calmer study plan, built around your energy and your deadlines.</p><div class="progress"><i></i></div><small>3 of 5 focus sessions completed</small></article><div class="section-head"><h2>This week</h2><span>August 2026</span></div><div class="week fade" id="calendarGrid"></div><div class="section-head"><h2>Today</h2><span>View calendar</span></div><div id="tasks"></div><button class="add" aria-label="Add assignment" id="addBtn">+</button><div class="modal" id="addModal"><div class="modal-box"><h2>New Assignment</h2><input type="text" id="titleInput" placeholder="Assignment name" autocomplete="off"><input type="text" id="subjectInput" placeholder="Subject" autocomplete="off"><input type="number" id="timeInput" placeholder="Time (minutes)" min="0" autocomplete="off"><div class="modal-buttons"><button class="btn-cancel" id="cancelBtn">Cancel</button><button class="btn-add" id="submitBtn">Add</button></div></div></div><nav class="bottom"><button class="nav selected"><span class="ico">⌂</span>Today</button><button class="nav"><span class="ico">▦</span>Calendar</button><button class="nav"><span class="ico">◷</span>Focus</button><button class="nav"><span class="ico">◌</span>Profile</button></nav></section></main><script>
 const state=$encodedState;
+if(!(state.allowedSubjects||[]).length){
+  const overlay=document.createElement('div');
+  overlay.style='position:fixed;inset:0;background:rgba(24,35,52,.55);z-index:200;display:grid;place-items:center;padding:24px';
+  overlay.innerHTML='<div style="background:#fbfcff;border-radius:24px;padding:24px;width:min(340px,100%);box-shadow:0 20px 60px rgba(0,0,0,.3)"><h2 style="font:600 20px Space Grotesk;margin:0 0 8px;color:#182334">Set up your subjects</h2><p style="font:13px DM Sans;margin:0 0 14px;color:#758196;line-height:1.5">Enter subjects as comma-separated values.</p><label style="display:block;font:600 12px DM Sans;color:#182334;margin-bottom:6px">Likes</label><input id="likesCsv" placeholder="Math, English" autofocus style="width:100%;padding:12px;border:1px solid #e9edf3;border-radius:12px;font:14px DM Sans"><label style="display:block;font:600 12px DM Sans;color:#182334;margin:14px 0 6px">Dislikes</label><input id="dislikesCsv" placeholder="History, Chemistry" style="width:100%;padding:12px;border:1px solid #e9edf3;border-radius:12px;font:14px DM Sans"><button id="saveSubjects" style="width:100%;margin-top:16px;padding:12px;border:0;border-radius:12px;background:#4777ee;color:white;font:600 13px DM Sans;cursor:pointer">Save subjects</button><p id="subjectError" style="color:#c84f45;font:12px DM Sans;margin:10px 0 0"></p></div>';
+  document.body.appendChild(overlay);
+  const likesCsv=document.getElementById('likesCsv');
+  const dislikesCsv=document.getElementById('dislikesCsv');
+  const saveSubjects=document.getElementById('saveSubjects');
+  const subjectError=document.getElementById('subjectError');
+  saveSubjects.addEventListener('click',async()=>{
+    const likes=likesCsv.value.trim();
+    const dislikes=dislikesCsv.value.trim();
+    if(!likes&&!dislikes){subjectError.textContent='Enter at least one subject.';return}
+    saveSubjects.disabled=true;
+    try{
+      const response=await fetch('/subjects',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:new URLSearchParams({likes,dislikes})});
+      const result=await response.json();
+      if(!response.ok||!result.ok)throw new Error(result.error||'Could not save subjects');
+      location.reload();
+    }catch(error){subjectError.textContent=error.message;saveSubjects.disabled=false}
+  });
+}
 const tasks=document.getElementById('tasks');
 const prioritiesHeading=[...document.querySelectorAll('.section-head h2')].find(item=>item.textContent.trim()==='Today');
 if(prioritiesHeading) prioritiesHeading.textContent='Priorities';
@@ -454,12 +521,16 @@ const submitBtn=document.getElementById('submitBtn');
 const titleInput=document.getElementById('titleInput');
 const subjectInput=document.getElementById('subjectInput');
 const timeInput=document.getElementById('timeInput');
+const subjectError=document.createElement('div');
+subjectError.id='subjectError';
+subjectError.style='display:none;color:#c84f45;font:12px DM Sans;margin:-6px 0 10px';
+subjectInput.insertAdjacentElement('afterend',subjectError);
 const dueDateInput=document.createElement('input');
 dueDateInput.type='date';
 dueDateInput.id='dueDateInput';
 dueDateInput.setAttribute('aria-label','Due date');
 timeInput.insertAdjacentElement('afterend',dueDateInput);
-submitBtn.addEventListener('click',async()=>{const title=titleInput.value.trim();const subject=subjectInput.value.trim();const estimated=timeInput.value.trim();const dueDate=dueDateInput.value;if(!title||!subject||!estimated||!dueDate){alert('Please fill in all fields');return}const params=new URLSearchParams({title,subject,estimated,dueDate});try{const res=await fetch('/add',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:params});if(res.ok){modal.classList.remove('open');titleInput.value='';subjectInput.value='';timeInput.value='';dueDateInput.value='';location.reload()}}catch(e){alert('Error adding assignment')}});
+submitBtn.addEventListener('click',async()=>{const title=titleInput.value.trim();const subject=subjectInput.value.trim();const estimated=timeInput.value.trim();const dueDate=dueDateInput.value;const knownSubjects=(state.allowedSubjects||[]).map(item=>String(item.name).toLowerCase());subjectError.style.display='none';if(!knownSubjects.includes(subject.toLowerCase())){subjectError.textContent='Subject does not exist. Choose one of your saved subjects.';subjectError.style.display='block';return}if(!title||!subject||!estimated||!dueDate){alert('Please fill in all fields');return}const params=new URLSearchParams({title,subject,estimated,dueDate});try{const res=await fetch('/add',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:params});const result=await res.json();if(!res.ok||!result.ok)throw new Error(result.error||'Could not add assignment');modal.classList.remove('open');titleInput.value='';subjectInput.value='';timeInput.value='';dueDateInput.value='';location.reload()}catch(e){subjectError.textContent=e.message;subjectError.style.display='block'}});
 const calendarGrid=document.getElementById('calendarGrid');
 const sectionHeads=[...document.querySelectorAll('.section-head')];
 const homeContent=[...document.querySelectorAll('.top,.hero,#tasks,#workTasks'),sectionHeads[1],workListHeading];
