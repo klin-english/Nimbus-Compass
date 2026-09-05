@@ -33,6 +33,11 @@ void saveTracker(AssignmentTracker tracker) {
   file.writeAsStringSync(jsonEncode(tracker.toJson()), flush: true);
 }
 
+class ActiveTimer {
+  DateTime? startedAt;
+  double elapsedMinutes = 0;
+}
+
 DateTime? parseFlexibleDate(String s) {
   final t = s.trim();
   if (t.isEmpty) return null;
@@ -330,7 +335,7 @@ Future<void> main(List<String> args) async {
   }
 
   final tracker = loadTracker();
-  final activeTimers = <String, DateTime>{};
+  final activeTimers = <String, ActiveTimer>{};
   final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
   final url = 'http://localhost:${server.port}';
 
@@ -394,7 +399,19 @@ Future<void> main(List<String> args) async {
       final dueDate = data['dueDate'] == null || data['dueDate']!.isEmpty
           ? null
           : DateTime.tryParse(data['dueDate']!);
-      tracker.addAssignment(title, subject, estimated, dueDate);
+      final parts = estimated >= 90
+          ? (estimated / 45).round().clamp(2, 100)
+          : 0;
+      final assignment = tracker.addAssignment(
+        title,
+        subject,
+        estimated,
+        dueDate,
+        parts,
+      );
+      if (parts > 1 && dueDate != null) {
+        tracker.scheduleAssignments([assignment]);
+      }
       saveTracker(tracker);
       exportToIcs(tracker.pendingAssignments);
       request.response
@@ -403,7 +420,9 @@ Future<void> main(List<String> args) async {
         ..write('{"ok":true}')
         ..close();
     } else if (request.method == 'POST' &&
-        (request.uri.path == '/start' || request.uri.path == '/stop')) {
+        (request.uri.path == '/start' ||
+            request.uri.path == '/pause' ||
+            request.uri.path == '/complete')) {
       final body = await utf8.decoder.bind(request).join();
       final data = Uri.parse('?$body').queryParameters;
       final title = data['title'] ?? '';
@@ -427,14 +446,32 @@ Future<void> main(List<String> args) async {
       }
 
       if (request.uri.path == '/start') {
-        activeTimers[key] = DateTime.now();
+        final timer = activeTimers.putIfAbsent(key, ActiveTimer.new);
+        timer.startedAt = DateTime.now();
         request.response
           ..headers.contentType = ContentType.json
           ..write('{"ok":true}')
           ..close();
+      } else if (request.uri.path == '/pause') {
+        final timer = activeTimers[key];
+        if (timer == null || timer.startedAt == null) {
+          request.response
+            ..statusCode = 400
+            ..headers.contentType = ContentType.json
+            ..write('{"ok":false,"error":"Timer is not running"}')
+            ..close();
+          return;
+        }
+        timer.elapsedMinutes +=
+            DateTime.now().difference(timer.startedAt!).inSeconds / 60.0;
+        timer.startedAt = null;
+        request.response
+          ..headers.contentType = ContentType.json
+          ..write(jsonEncode({'ok': true, 'elapsed': timer.elapsedMinutes}))
+          ..close();
       } else {
-        final started = activeTimers.remove(key);
-        if (started == null) {
+        final timer = activeTimers.remove(key);
+        if (timer == null) {
           request.response
             ..statusCode = 400
             ..headers.contentType = ContentType.json
@@ -442,8 +479,11 @@ Future<void> main(List<String> args) async {
             ..close();
           return;
         }
-        final elapsedMinutes =
-            DateTime.now().difference(started).inSeconds / 60.0;
+        var elapsedMinutes = timer.elapsedMinutes;
+        if (timer.startedAt != null) {
+          elapsedMinutes +=
+              DateTime.now().difference(timer.startedAt!).inSeconds / 60.0;
+        }
         tracker.completePendingAssignment(assignment, elapsedMinutes);
         tracker.assignments.remove(assignment);
         saveTracker(tracker);
@@ -514,6 +554,13 @@ workListHeading.innerHTML='<h2>Work List</h2>';
 const workTasks=document.createElement('div');
 workTasks.id='workTasks';
 tasks.after(workListHeading,workTasks);
+const profileSubjectsHeading=document.createElement('div');
+profileSubjectsHeading.className='section-head';
+profileSubjectsHeading.innerHTML='<h2>Subjects</h2>';
+const profileSubjects=document.createElement('div');
+profileSubjects.id='profileSubjects';
+profileSubjects.innerHTML=(state.allowedSubjects||[]).map(subject=>'<div class="task"><span class="dot '+(subject.likes?'green':'')+'"></span><div><h3>'+escapeHtml(subject.name)+'</h3><p>'+(subject.likes?'Like':'Dislike')+'</p></div></div>').join('');
+workTasks.after(profileSubjectsHeading,profileSubjects);
 const modal=document.getElementById('addModal');
 const addBtn=document.getElementById('addBtn');
 const cancelBtn=document.getElementById('cancelBtn');
@@ -533,18 +580,35 @@ timeInput.insertAdjacentElement('afterend',dueDateInput);
 submitBtn.addEventListener('click',async()=>{const title=titleInput.value.trim();const subject=subjectInput.value.trim();const estimated=timeInput.value.trim();const dueDate=dueDateInput.value;const knownSubjects=(state.allowedSubjects||[]).map(item=>String(item.name).toLowerCase());subjectError.style.display='none';if(!knownSubjects.includes(subject.toLowerCase())){subjectError.textContent='Subject does not exist. Choose one of your saved subjects.';subjectError.style.display='block';return}if(!title||!subject||!estimated||!dueDate){alert('Please fill in all fields');return}const params=new URLSearchParams({title,subject,estimated,dueDate});try{const res=await fetch('/add',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:params});const result=await res.json();if(!res.ok||!result.ok)throw new Error(result.error||'Could not add assignment');modal.classList.remove('open');titleInput.value='';subjectInput.value='';timeInput.value='';dueDateInput.value='';location.reload()}catch(e){subjectError.textContent=e.message;subjectError.style.display='block'}});
 const calendarGrid=document.getElementById('calendarGrid');
 const sectionHeads=[...document.querySelectorAll('.section-head')];
-const homeContent=[...document.querySelectorAll('.top,.hero,#tasks,#workTasks'),sectionHeads[1],workListHeading];
+const listContent=[tasks,workTasks,sectionHeads[1],workListHeading];
+const homeContent=[...document.querySelectorAll('.top,.hero'),...listContent];
+const profileContent=[...listContent,profileSubjectsHeading,profileSubjects];
 const calendarContent=[sectionHeads[0],calendarGrid];
 const addButton=document.getElementById('addBtn');
 calendarContent.forEach(item=>item.hidden=true);
+sectionHeads[0].style.display='none';
+calendarGrid.style.display='none';
+sectionHeads[1].style.display='flex';
+workListHeading.style.display='flex';
+profileSubjectsHeading.style.display='none';
+profileSubjects.style.display='none';
 document.querySelectorAll('.nav').forEach(nav=>nav.addEventListener('click',()=>{
   const label=nav.textContent.trim();
   const isToday=label.includes('Today');
   const isCalendar=label.includes('Calendar');
+  const isProfile=label.includes('Profile');
   document.querySelectorAll('.nav').forEach(item=>item.classList.remove('selected'));
   nav.classList.add('selected');
   homeContent.forEach(item=>item.hidden=!isToday);
+  listContent.forEach(item=>item.hidden=!(isToday||isProfile));
+  profileContent.forEach(item=>item.hidden=!isProfile);
   calendarContent.forEach(item=>item.hidden=!isCalendar);
+  sectionHeads[1].style.display=(isToday||isProfile)?'flex':'none';
+  workListHeading.style.display=(isToday||isProfile)?'flex':'none';
+  profileSubjectsHeading.style.display=isProfile?'flex':'none';
+  profileSubjects.style.display=isProfile?'block':'none';
+  sectionHeads[0].style.display=isCalendar?'flex':'none';
+  calendarGrid.style.display=isCalendar?'grid':'none';
   addButton.hidden=!isToday;
 }));
 const saved=(state.assignments||[]).filter(a=>!a.actual);
@@ -558,24 +622,31 @@ saved.forEach(a=>{
   const isPriority=(daysAway<=7)||(!isPart&&Number(a.estimated||0)>=90);
   (isPriority?priorities:workList).push(a);
 });
-function renderTasks(list,target){list.forEach((a,i)=>{const row=document.createElement('div');row.className='task fade';row.style.animationDelay=(i*80)+'ms';row.innerHTML='<span class="dot"></span><div><h3>'+escapeHtml(a.title||'Assignment')+'</h3><p>'+escapeHtml(a.subject||'Study')+' · '+Math.round(a.estimated||0)+' min</p></div><span class="time">'+(a.dueDate?formatDate(a.dueDate):'Soon')+'</span><button class="start-task" data-title="'+escapeHtml(a.title||'Assignment')+'" data-due="'+escapeHtml(a.dueDate||'')+'">Start</button>';target.appendChild(row)})}
+function renderTasks(list,target){list.forEach((a,i)=>{const row=document.createElement('div');row.className='task fade';row.style.animationDelay=(i*80)+'ms';row.innerHTML='<span class="dot"></span><div><h3>'+escapeHtml(a.title||'Assignment')+'</h3><p>'+escapeHtml(a.subject||'Study')+' · '+Math.round(a.estimated||0)+' min</p></div><span class="time">'+(a.dueDate?formatDate(a.dueDate):'Soon')+'</span><div class="timer-controls"><button class="start-task" data-action="start">Start</button></div>';row.dataset.title=a.title||'Assignment';row.dataset.due=a.dueDate||'';target.appendChild(row)})}
 renderTasks(priorities,tasks);
 renderTasks(workList,workTasks);
-document.querySelectorAll('.start-task').forEach(button=>button.addEventListener('click',async()=>{
-  const running=button.dataset.running==='true';
-  const endpoint=running?'/stop':'/start';
+function setTimerControls(row,mode){
+  const controls=row.querySelector('.timer-controls');
+  if(mode==='start'){controls.innerHTML='<button class="start-task" data-action="start">Start</button>';}
+  if(mode==='running'){controls.innerHTML='<button class="start-task" data-action="pause">Pause</button><button class="complete-task" data-action="complete">Complete</button>';}
+  if(mode==='paused'){controls.innerHTML='<button class="start-task" data-action="start">Resume</button><button class="complete-task" data-action="complete">Complete</button>';}
+  controls.querySelectorAll('button').forEach(bindTimerButton);
+}
+async function bindTimerButton(button){button.onclick=async()=>{
+  const row=button.closest('.task');
+  const action=button.dataset.action;
+  const endpoint=action==='complete'?'/complete':(action==='pause'?'/pause':'/start');
   button.disabled=true;
-  const body=new URLSearchParams({title:button.dataset.title,dueDate:button.dataset.due||''});
+  const body=new URLSearchParams({title:row.dataset.title,dueDate:row.dataset.due||''});
   try{
     const response=await fetch(endpoint,{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body});
     const result=await response.json();
     if(!response.ok||!result.ok) throw new Error(result.error||'Timer request failed');
-    if(running){location.reload();return}
-    button.dataset.running='true';
-    button.textContent='Stop';
-    button.disabled=false;
+    if(action==='complete'){location.reload();return}
+    setTimerControls(row,action==='pause'?'paused':'running');
   }catch(error){alert(error.message);button.disabled=false}
-}));
+}}
+document.querySelectorAll('.start-task').forEach(bindTimerButton);
 const calendarDate=new Date();
 function renderCalendar(){
   const year=calendarDate.getFullYear(), month=calendarDate.getMonth();
