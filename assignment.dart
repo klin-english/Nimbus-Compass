@@ -245,8 +245,12 @@ class AssignmentTracker {
     for (final a in pending) {
       if (a.parts > 1 && a.dueDate != null) {
         final parts = a.parts;
+        final dueToday =
+            a.dueDate!.year == now.year &&
+            a.dueDate!.month == now.month &&
+            a.dueDate!.day == now.day;
         var totalDays = a.dueDate!.difference(now).inDays;
-        if (totalDays < 1) totalDays = 1;
+        if (!dueToday && totalDays < 1) totalDays = 1;
 
         // compute base spacing; prefer at least one-day gap when there's room
         var gapDays = totalDays ~/ parts;
@@ -271,7 +275,6 @@ class AssignmentTracker {
         var remainder = totalMinutes % parts;
         for (var i = 0; i < parts; i++) {
           final offset = lastDayOffset + gapDays;
-          final partDue = now.add(Duration(days: offset));
           lastDayOffset = offset;
 
           var partMinutes = base;
@@ -279,6 +282,10 @@ class AssignmentTracker {
             partMinutes += 1;
             remainder -= 1;
           }
+
+          final partDue = dueToday
+              ? now.add(Duration(minutes: i * 60))
+              : now.add(Duration(days: offset));
 
           final partTitle = '${a.title} (Part ${i + 1}/$parts)';
           final partEst = partMinutes.toDouble();

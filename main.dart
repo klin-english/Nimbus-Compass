@@ -38,6 +38,19 @@ class ActiveTimer {
   double elapsedMinutes = 0;
 }
 
+bool isSameLocalDate(DateTime first, DateTime second) {
+  return first.year == second.year &&
+      first.month == second.month &&
+      first.day == second.day;
+}
+
+bool isAllowedDueDate(DateTime dueDate, DateTime now) {
+  if (dueDate.isBefore(DateTime(now.year, now.month, now.day))) {
+    return false;
+  }
+  return !isSameLocalDate(dueDate, now) || now.hour < 22;
+}
+
 DateTime? parseFlexibleDate(String s) {
   final t = s.trim();
   if (t.isEmpty) return null;
@@ -438,19 +451,21 @@ Future<void> main(List<String> args) async {
       final dueDate = data['dueDate'] == null || data['dueDate']!.isEmpty
           ? null
           : DateTime.tryParse(data['dueDate']!);
+      if (dueDate == null || !isAllowedDueDate(dueDate, DateTime.now())) {
+        request.response
+          ..statusCode = 400
+          ..headers.contentType = ContentType.json
+          ..write(
+            '{"ok":false,"error":"Today\'s tasks must be added before 10:00 PM local time, and the date cannot be in the past"}',
+          )
+          ..close();
+        return;
+      }
       final parts = estimated >= 90
           ? (estimated / 45).round().clamp(2, 100)
           : 0;
-      final assignment = tracker.addAssignment(
-        title,
-        subject,
-        estimated,
-        dueDate,
-        parts,
-      );
-      if (parts > 1 && dueDate != null) {
-        tracker.scheduleAssignments([assignment]);
-      }
+      tracker.addAssignment(title, subject, estimated, dueDate, parts);
+      tracker.scheduleAssignments(tracker.pendingAssignments);
       saveTracker(tracker);
       exportToIcs(tracker.pendingAssignments);
       request.response
@@ -626,8 +641,12 @@ const dueDateInput=document.createElement('input');
 dueDateInput.type='date';
 dueDateInput.id='dueDateInput';
 dueDateInput.setAttribute('aria-label','Due date');
+const localToday=new Date();
+const localTodayValue=localToday.getFullYear()+'-'+String(localToday.getMonth()+1).padStart(2,'0')+'-'+String(localToday.getDate()).padStart(2,'0');
+dueDateInput.min=localTodayValue;
+dueDateInput.value=localTodayValue;
 timeInput.insertAdjacentElement('afterend',dueDateInput);
-submitBtn.addEventListener('click',async()=>{const title=titleInput.value.trim();const subject=subjectInput.value.trim();const estimated=timeInput.value.trim();const dueDate=dueDateInput.value;const knownSubjects=(state.allowedSubjects||[]).map(item=>String(item.name).toLowerCase());subjectError.style.display='none';if(!knownSubjects.includes(subject.toLowerCase())){subjectError.textContent='Subject does not exist. Choose one of your saved subjects.';subjectError.style.display='block';return}if(!title||!subject||!estimated||!dueDate){alert('Please fill in all fields');return}const params=new URLSearchParams({title,subject,estimated,dueDate});try{const res=await fetch('/add',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:params});const result=await res.json();if(!res.ok||!result.ok)throw new Error(result.error||'Could not add assignment');modal.classList.remove('open');titleInput.value='';subjectInput.value='';timeInput.value='';dueDateInput.value='';location.reload()}catch(e){subjectError.textContent=e.message;subjectError.style.display='block'}});
+submitBtn.addEventListener('click',async()=>{const title=titleInput.value.trim();const subject=subjectInput.value.trim();const estimated=timeInput.value.trim();const dueDate=dueDateInput.value;const knownSubjects=(state.allowedSubjects||[]).map(item=>String(item.name).toLowerCase());subjectError.style.display='none';if(!knownSubjects.includes(subject.toLowerCase())){subjectError.textContent='Subject does not exist. Choose one of your saved subjects.';subjectError.style.display='block';return}if(!title||!subject||!estimated||!dueDate){alert('Please fill in all fields');return}const now=new Date();const todayValue=now.getFullYear()+'-'+String(now.getMonth()+1).padStart(2,'0')+'-'+String(now.getDate()).padStart(2,'0');if(dueDate<todayValue){alert('The due date cannot be in the past.');return}if(dueDate===todayValue&&now.getHours()>=22){alert('Tasks for today must be added before 10:00 PM local time.');return}const params=new URLSearchParams({title,subject,estimated,dueDate});try{const res=await fetch('/add',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:params});const result=await res.json();if(!res.ok||!result.ok)throw new Error(result.error||'Could not add assignment');modal.classList.remove('open');titleInput.value='';subjectInput.value='';timeInput.value='';dueDateInput.value=localTodayValue;location.reload()}catch(e){subjectError.textContent=e.message;subjectError.style.display='block'}});
 const calendarGrid=document.getElementById('calendarGrid');
 const sectionHeads=[...document.querySelectorAll('.section-head')];
 const listContent=[tasks,workTasks,sectionHeads[1],workListHeading];
@@ -662,6 +681,16 @@ document.querySelectorAll('.nav').forEach(nav=>nav.addEventListener('click',()=>
   addButton.hidden=!isToday;
 }));
 const saved=(state.assignments||[]).filter(a=>!a.actual);
+function assignmentRoot(title){const value=String(title||'');const marker=' (Part ';const index=value.indexOf(marker);return index<0?value:value.slice(0,index)}
+function assignmentOrder(a,b){
+  const aDate=a.dueDate?new Date(a.dueDate).getTime():Number.MAX_SAFE_INTEGER;
+  const bDate=b.dueDate?new Date(b.dueDate).getTime():Number.MAX_SAFE_INTEGER;
+  if(aDate!==bDate)return aDate-bDate;
+  const rootCompare=assignmentRoot(a.title).localeCompare(assignmentRoot(b.title));
+  if(rootCompare!==0)return rootCompare;
+  return String(a.title||'').localeCompare(String(b.title||''));
+}
+saved.sort(assignmentOrder);
 const now=new Date();
 const priorities=[];
 const workList=[];
@@ -672,6 +701,8 @@ saved.forEach(a=>{
   const isPriority=(daysAway<=7)||(!isPart&&Number(a.estimated||0)>=90);
   (isPriority?priorities:workList).push(a);
 });
+priorities.sort(assignmentOrder);
+workList.sort(assignmentOrder);
 function renderTasks(list,target){list.forEach((a,i)=>{const row=document.createElement('div');row.className='task fade';row.style.animationDelay=(i*80)+'ms';row.innerHTML='<span class="dot"></span><div><h3>'+escapeHtml(a.title||'Assignment')+'</h3><p>'+escapeHtml(a.subject||'Study')+' · '+Math.round(a.estimated||0)+' min</p></div><span class="time">'+(a.dueDate?formatDate(a.dueDate):'Soon')+'</span><div class="timer-controls"><button class="start-task" data-action="start">Start</button></div>';row.dataset.title=a.title||'Assignment';row.dataset.due=a.dueDate||'';target.appendChild(row)})}
 renderTasks(priorities,tasks);
 renderTasks(workList,workTasks);
@@ -708,7 +739,7 @@ function renderCalendar(){
   for(let day=1;day<=daysInMonth;day++){
     const cell=document.createElement('div');cell.className='day calendar-day';
     const dateKey=year+'-'+String(month+1).padStart(2,'0')+'-'+String(day).padStart(2,'0');
-    const matches=(state.assignments||[]).filter(a=>a.dueDate&&a.dueDate.startsWith(dateKey));
+    const matches=saved.filter(a=>a.dueDate&&a.dueDate.startsWith(dateKey));
     cell.innerHTML='<span>'+day+'</span>'+matches.slice(0,2).map(a=>'<small title="'+escapeHtml(a.title||'Assignment')+'">'+escapeHtml((a.title||'Assignment').slice(0,9))+'</small>').join('');
     if(matches.length)cell.classList.add('has-event');
     if(day===new Date().getDate()&&month===new Date().getMonth()&&year===new Date().getFullYear())cell.classList.add('active');
