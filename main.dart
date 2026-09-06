@@ -38,6 +38,7 @@ class Assignment {
   double? _actualTime;
   final DateTime? _dueDate;
   final int _parts;
+  final bool _spreadOut;
 
   Assignment(
     this._title,
@@ -45,10 +46,12 @@ class Assignment {
     double estimatedTime, [
     DateTime? dueDate,
     int parts = 0,
+    bool spreadOut = false,
   ]) : _estimatedTime = estimatedTime.abs(),
        _baselineEfficiency = _subject.efficiencyFactor,
        _dueDate = dueDate,
-       _parts = parts;
+       _parts = parts,
+       _spreadOut = spreadOut;
 
   double get adjustedEstimate {
     return _estimatedTime * _baselineEfficiency;
@@ -69,6 +72,10 @@ class Assignment {
   String get title => _title;
   DateTime? get dueDate => _dueDate;
   int get parts => _parts;
+  // When true, work sessions for a split assignment are spread evenly
+  // across every available day instead of being crammed into as few days
+  // as realistically possible.
+  bool get spreadOut => _spreadOut;
 }
 
 class AssignmentTracker {
@@ -76,9 +83,22 @@ class AssignmentTracker {
   final Map<String, Subject> _subjects = {};
   final List<Subject> allowedSubjects = [];
 
+  // Hour of day (0-23, local time, 24h clock) after which same-day
+  // assignments can no longer be added. Defaults to 22 (10:00 PM) and is
+  // adjustable from the Profile tab.
+  int sameDayCutoffHour = 22;
+
   AssignmentTracker();
 
   AssignmentTracker.fromJson(Map<String, dynamic> json) {
+    final cutoff = json['sameDayCutoffHour'];
+    if (cutoff is num) {
+      final hour = cutoff.toInt();
+      if (hour >= 0 && hour <= 23) {
+        sameDayCutoffHour = hour;
+      }
+    }
+
     final savedSubjects = json['allowedSubjects'] as List<dynamic>?;
     if (savedSubjects != null) {
       for (final subject in savedSubjects) {
@@ -120,8 +140,18 @@ class AssignmentTracker {
       final parts = (map['parts'] is int)
           ? (map['parts'] as int)
           : (map['parts'] is num ? (map['parts'] as num).toInt() : 0);
+      final spreadOut = map['spreadOut'] is bool
+          ? map['spreadOut'] as bool
+          : false;
 
-      final assignment = Assignment(title, subject, estimated, due, parts);
+      final assignment = Assignment(
+        title,
+        subject,
+        estimated,
+        due,
+        parts,
+        spreadOut,
+      );
       if (map.containsKey('actual') && map['actual'] != null) {
         assignment.complete((map['actual'] as num).toDouble());
       }
@@ -140,8 +170,16 @@ class AssignmentTracker {
     }
   }
 
+  void updateSameDayCutoffHour(int hour) {
+    if (hour < 0 || hour > 23) {
+      throw ArgumentError('Cutoff hour must be between 0 and 23');
+    }
+    sameDayCutoffHour = hour;
+  }
+
   Map<String, dynamic> toJson() {
     return {
+      'sameDayCutoffHour': sameDayCutoffHour,
       'assignments': assignments.map((a) {
         return {
           'title': a.title,
@@ -150,6 +188,7 @@ class AssignmentTracker {
           'actual': a.actualTime,
           'dueDate': a.dueDate?.toIso8601String(),
           'parts': a.parts,
+          'spreadOut': a.spreadOut,
         };
       }).toList(),
       'allowedSubjects': allowedSubjects.map((subject) {
@@ -165,9 +204,17 @@ class AssignmentTracker {
     double actual, [
     DateTime? dueDate,
     int parts = 0,
+    bool spreadOut = false,
   ]) {
     final subject = getOrCreateSubject(subjectName);
-    final assignment = Assignment(title, subject, estimate, dueDate, parts);
+    final assignment = Assignment(
+      title,
+      subject,
+      estimate,
+      dueDate,
+      parts,
+      spreadOut,
+    );
     assignment.complete(actual);
     assignments.add(assignment);
     return assignment;
@@ -179,9 +226,17 @@ class AssignmentTracker {
     double estimate, [
     DateTime? dueDate,
     int parts = 0,
+    bool spreadOut = false,
   ]) {
     final subject = getOrCreateSubject(subjectName);
-    final assignment = Assignment(title, subject, estimate, dueDate, parts);
+    final assignment = Assignment(
+      title,
+      subject,
+      estimate,
+      dueDate,
+      parts,
+      spreadOut,
+    );
     assignments.add(assignment);
     return assignment;
   }
@@ -245,52 +300,158 @@ class AssignmentTracker {
 
   List<Assignment> scheduleAssignments(List<Assignment> pending) {
     final now = DateTime.now();
+    final today = DateTime(now.year, now.month, now.day);
     final expanded = <Assignment>[];
 
     for (final a in pending) {
       if (a.parts > 1 && a.dueDate != null) {
         final parts = a.parts;
-        final dueToday =
-            a.dueDate!.year == now.year &&
-            a.dueDate!.month == now.month &&
-            a.dueDate!.day == now.day;
-        var totalDays = a.dueDate!.difference(now).inDays;
-        if (!dueToday && totalDays < 1) totalDays = 1;
 
-        // compute base spacing; prefer at least one-day gap when there's room
-        var gapDays = totalDays ~/ parts;
-        if (gapDays < 1) gapDays = 1;
-
-        // If there's enough room to avoid consecutive-day sessions (needs 2*parts-1 days),
-        // prefer a gap of at least 2 days when base gap is 1
-        if (gapDays == 1 && totalDays >= (2 * parts - 1)) {
-          gapDays = 2;
+        // `dueDate` is the actual deadline instant (defaults to 12:00 AM /
+        // midnight of the chosen due day, but can carry a later time if the
+        // person customized it). Work must be *finished before* that
+        // instant, so the last day it can land on is the day before the
+        // deadline's calendar day -- unless the deadline has a later
+        // time-of-day that leaves room earlier that same day.
+        final deadline = a.dueDate!;
+        final oneMinuteBeforeDeadline = deadline.subtract(
+          const Duration(minutes: 1),
+        );
+        var lastSchedulableDay = DateTime(
+          oneMinuteBeforeDeadline.year,
+          oneMinuteBeforeDeadline.month,
+          oneMinuteBeforeDeadline.day,
+        );
+        if (lastSchedulableDay.isBefore(today)) {
+          // The deadline has already passed; do the best we can today.
+          lastSchedulableDay = today;
         }
+
+        // The first day work can land on: today, if we're still before the
+        // configured same-day cutoff, otherwise tomorrow. If that would push
+        // past the last schedulable day, fall back to it so we never
+        // schedule anything past the deadline.
+        var startDay = now.hour < sameDayCutoffHour
+            ? today
+            : today.add(const Duration(days: 1));
+        if (startDay.isAfter(lastSchedulableDay)) {
+          startDay = lastSchedulableDay;
+        }
+
+        final availableDays =
+            lastSchedulableDay.difference(startDay).inDays + 1;
+
+        // compute integer-minute durations for parts that sum to original estimate
+        final totalMinutes = a.estimatedTime.round();
+        final partMinutesList = <int>[];
+        {
+          final base = totalMinutes ~/ parts;
+          var remainder = totalMinutes % parts;
+          for (var i = 0; i < parts; i++) {
+            var partMinutes = base;
+            if (remainder > 0) {
+              partMinutes += 1;
+              remainder -= 1;
+            }
+            partMinutesList.add(partMinutes);
+          }
+        }
+
+        // Cram as much work as realistically fits on one day before
+        // spilling onto the next (default), or spread it evenly across
+        // every available day if the person explicitly asked for that via
+        // the "spread out" option when adding the assignment.
+        final dayOffsets = <int>[];
+        if (a.spreadOut) {
+          if (availableDays >= parts) {
+            for (var i = 0; i < parts; i++) {
+              final offset = parts == 1
+                  ? 0
+                  : (i * (availableDays - 1)) ~/ (parts - 1);
+              dayOffsets.add(offset);
+            }
+          } else {
+            final base = parts ~/ availableDays;
+            final remainder = parts % availableDays;
+            for (var d = 0; d < availableDays; d++) {
+              final countForDay = base + (d < remainder ? 1 : 0);
+              for (var c = 0; c < countForDay; c++) {
+                dayOffsets.add(d);
+              }
+            }
+          }
+        } else {
+          const maxRealisticDailyMinutes = 180; // ~3 hours/day cap
+          var dayOffset = 0;
+          var minutesUsedToday = 0;
+          for (var i = 0; i < parts; i++) {
+            final partMinutes = partMinutesList[i];
+            final wouldOverflowDay =
+                minutesUsedToday > 0 &&
+                minutesUsedToday + partMinutes > maxRealisticDailyMinutes;
+            if (wouldOverflowDay && dayOffset < availableDays - 1) {
+              dayOffset += 1;
+              minutesUsedToday = 0;
+            }
+            dayOffsets.add(dayOffset);
+            minutesUsedToday += partMinutes;
+          }
+        }
+
+        // For every day that ends up with sessions, work out a start time
+        // and a safe spacing so that sessions stacked on the same day never
+        // spill past that day's cutoff (23:59, or the exact deadline time if
+        // this is the deadline's own calendar day) into the next day.
+        final countsByOffset = <int, int>{};
+        for (final offset in dayOffsets) {
+          countsByOffset[offset] = (countsByOffset[offset] ?? 0) + 1;
+        }
+        final dayStart = <int, DateTime>{};
+        final dayIntervalMinutes = <int, int>{};
+        countsByOffset.forEach((offset, count) {
+          final sessionDay = startDay.add(Duration(days: offset));
+          final start = isSameLocalDate(sessionDay, now)
+              ? now
+              : DateTime(sessionDay.year, sessionDay.month, sessionDay.day, 9);
+          final windowEnd = isSameLocalDate(sessionDay, deadline)
+              ? deadline
+              : DateTime(
+                  sessionDay.year,
+                  sessionDay.month,
+                  sessionDay.day,
+                  23,
+                  59,
+                );
+          final availableMinutes = windowEnd.isAfter(start)
+              ? windowEnd.difference(start).inMinutes
+              : 0;
+          final interval = count <= 1
+              ? 0
+              : (availableMinutes ~/ (count - 1)).clamp(0, 60);
+          dayStart[offset] = start;
+          dayIntervalMinutes[offset] = interval;
+        });
 
         // replace the original assignment with its parts in the tracker's list
         try {
           assignments.remove(a);
         } catch (_) {}
 
-        // create part dates, ensuring each part lands on a different day
-        var lastDayOffset = 0;
-        // compute integer-minute durations for parts that sum to original estimate
-        final totalMinutes = a.estimatedTime.round();
-        final base = totalMinutes ~/ parts;
-        var remainder = totalMinutes % parts;
+        final sessionsOnDay = <int, int>{};
         for (var i = 0; i < parts; i++) {
-          final offset = lastDayOffset + gapDays;
-          lastDayOffset = offset;
+          final partMinutes = partMinutesList[i];
 
-          var partMinutes = base;
-          if (remainder > 0) {
-            partMinutes += 1;
-            remainder -= 1;
-          }
-
-          final partDue = dueToday
-              ? now.add(Duration(minutes: i * 60))
-              : now.add(Duration(days: offset));
+          final offsetForPart = dayOffsets[i];
+          final sessionIndex = sessionsOnDay.update(
+            offsetForPart,
+            (v) => v + 1,
+            ifAbsent: () => 0,
+          );
+          final partDue = dayStart[offsetForPart]!.add(
+            Duration(
+              minutes: dayIntervalMinutes[offsetForPart]! * sessionIndex,
+            ),
+          );
 
           final partTitle = '${a.title} (Part ${i + 1}/$parts)';
           final partEst = partMinutes.toDouble();
@@ -385,11 +546,20 @@ bool isSameLocalDate(DateTime first, DateTime second) {
       first.day == second.day;
 }
 
-bool isAllowedDueDate(DateTime dueDate, DateTime now) {
+bool isAllowedDueDate(DateTime dueDate, DateTime now, [int cutoffHour = 22]) {
   if (dueDate.isBefore(DateTime(now.year, now.month, now.day))) {
     return false;
   }
-  return !isSameLocalDate(dueDate, now) || now.hour < 22;
+  return !isSameLocalDate(dueDate, now) || now.hour < cutoffHour;
+}
+
+/// Formats an hour (0-23) as a friendly 12-hour clock label, e.g. 22 -> "10:00 PM".
+String formatHourLabel(int hour) {
+  final normalized = hour % 24;
+  final period = normalized >= 12 ? 'PM' : 'AM';
+  var displayHour = normalized % 12;
+  if (displayHour == 0) displayHour = 12;
+  return '$displayHour:00 $period';
 }
 
 DateTime? parseFlexibleDate(String s) {
@@ -733,6 +903,26 @@ Future<void> main(List<String> args) async {
         ..headers.contentType = ContentType.json
         ..write('{"ok":true}')
         ..close();
+    } else if (request.method == 'POST' && request.uri.path == '/settings') {
+      final body = await utf8.decoder.bind(request).join();
+      final data = Uri.parse('?$body').queryParameters;
+      final hour = int.tryParse(data['sameDayCutoffHour'] ?? '');
+
+      if (hour == null || hour < 0 || hour > 23) {
+        request.response
+          ..statusCode = 400
+          ..headers.contentType = ContentType.json
+          ..write('{"ok":false,"error":"Enter an hour between 0 and 23"}')
+          ..close();
+        return;
+      }
+
+      tracker.updateSameDayCutoffHour(hour);
+      saveTracker(tracker);
+      request.response
+        ..headers.contentType = ContentType.json
+        ..write('{"ok":true}')
+        ..close();
     } else if (request.method == 'POST' &&
         request.uri.path == '/delete-subject') {
       final body = await utf8.decoder.bind(request).join();
@@ -792,12 +982,22 @@ Future<void> main(List<String> args) async {
       final dueDate = data['dueDate'] == null || data['dueDate']!.isEmpty
           ? null
           : DateTime.tryParse(data['dueDate']!);
-      if (dueDate == null || !isAllowedDueDate(dueDate, DateTime.now())) {
+      if (dueDate == null ||
+          !isAllowedDueDate(
+            dueDate,
+            DateTime.now(),
+            tracker.sameDayCutoffHour,
+          )) {
+        final cutoffLabel = formatHourLabel(tracker.sameDayCutoffHour);
         request.response
           ..statusCode = 400
           ..headers.contentType = ContentType.json
           ..write(
-            '{"ok":false,"error":"Today\'s tasks must be added before 10:00 PM local time, and the date cannot be in the past"}',
+            jsonEncode({
+              'ok': false,
+              'error':
+                  "Today's tasks must be added before $cutoffLabel local time, and the date cannot be in the past",
+            }),
           )
           ..close();
         return;
@@ -805,7 +1005,15 @@ Future<void> main(List<String> args) async {
       final parts = estimated >= 90
           ? (estimated / 45).round().clamp(2, 100)
           : 0;
-      tracker.addAssignment(title, subject, estimated, dueDate, parts);
+      final spreadOut = data['spreadOut'] == '1' || data['spreadOut'] == 'true';
+      tracker.addAssignment(
+        title,
+        subject,
+        estimated,
+        dueDate,
+        parts,
+        spreadOut,
+      );
       tracker.scheduleAssignments(tracker.pendingAssignments);
       saveTracker(tracker);
       exportToIcs(tracker.pendingAssignments);
@@ -941,14 +1149,17 @@ if(!(state.allowedSubjects||[]).length){
   });
 }
 const tasks=document.getElementById('tasks');
-const prioritiesHeading=[...document.querySelectorAll('.section-head h2')].find(item=>item.textContent.trim()==='Today');
-if(prioritiesHeading) prioritiesHeading.textContent='Priorities';
+const tomorrowHeading=document.createElement('div');
+tomorrowHeading.className='section-head';
+tomorrowHeading.innerHTML='<h2>Tomorrow</h2>';
+const tomorrowTasks=document.createElement('div');
+tomorrowTasks.id='tomorrowTasks';
 const workListHeading=document.createElement('div');
 workListHeading.className='section-head';
 workListHeading.innerHTML='<h2>Work List</h2>';
 const workTasks=document.createElement('div');
 workTasks.id='workTasks';
-tasks.after(workListHeading,workTasks);
+tasks.after(tomorrowHeading,tomorrowTasks,workListHeading,workTasks);
 const profileSubjectsHeading=document.createElement('div');
 profileSubjectsHeading.className='section-head';
 profileSubjectsHeading.innerHTML='<h2>Subjects</h2>';
@@ -956,6 +1167,29 @@ const profileSubjects=document.createElement('div');
 profileSubjects.id='profileSubjects';
 profileSubjects.innerHTML='<p style="color:#c84f45;font:12px DM Sans;margin:0 0 12px">Deleting a subject also deletes every assignment with that subject.</p>'+(state.allowedSubjects||[]).map(subject=>'<div class="task"><span class="dot '+(subject.likes?'green':'')+'"></span><div><h3>'+escapeHtml(subject.name)+'</h3><p>'+(subject.likes?'Like':'Dislike')+'</p></div><button class="delete-subject" data-subject="'+escapeHtml(subject.name)+'" style="margin-left:auto;border:0;border-radius:9px;background:#fff0ee;color:#c84f45;font:600 11px DM Sans;padding:7px 9px;cursor:pointer">Delete</button></div>').join('');
 workTasks.after(profileSubjectsHeading,profileSubjects);
+function cutoffHourLabel(hour){const normalized=((hour%24)+24)%24;const period=normalized>=12?'PM':'AM';let displayHour=normalized%12;if(displayHour===0)displayHour=12;return displayHour+':00 '+period}
+const profileSchedulingHeading=document.createElement('div');
+profileSchedulingHeading.className='section-head';
+profileSchedulingHeading.innerHTML='<h2>Scheduling</h2>';
+const profileScheduling=document.createElement('div');
+profileScheduling.id='profileScheduling';
+const currentCutoffHour=Number.isFinite(state.sameDayCutoffHour)?state.sameDayCutoffHour:22;
+const cutoffOptions=Array.from({length:24},(_,hour)=>'<option value="'+hour+'"'+(hour===currentCutoffHour?' selected':'')+'>'+cutoffHourLabel(hour)+'</option>').join('');
+profileScheduling.innerHTML='<div class="task" style="align-items:flex-start"><div style="width:100%"><h3>Same-day cutoff</h3><p style="margin-bottom:10px">Latest local time you can still add a task due today.</p><select id="cutoffSelect" style="width:100%;padding:11px 13px;border:1px solid #e9edf3;border-radius:12px;font:14px DM Sans;color:#182334">'+cutoffOptions+'</select><button id="saveCutoff" style="width:100%;margin-top:10px;padding:11px;border:0;border-radius:10px;background:#4777ee;color:white;font:600 13px DM Sans;cursor:pointer">Save</button><p id="cutoffError" style="color:#c84f45;font:12px DM Sans;margin:8px 0 0"></p></div></div>';
+profileSubjects.after(profileSchedulingHeading,profileScheduling);
+document.getElementById('saveCutoff').addEventListener('click',async()=>{
+  const select=document.getElementById('cutoffSelect');
+  const errorEl=document.getElementById('cutoffError');
+  const saveBtn=document.getElementById('saveCutoff');
+  errorEl.textContent='';
+  saveBtn.disabled=true;
+  try{
+    const response=await fetch('/settings',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:new URLSearchParams({sameDayCutoffHour:select.value})});
+    const result=await response.json();
+    if(!response.ok||!result.ok)throw new Error(result.error||'Could not save setting');
+    location.reload();
+  }catch(error){errorEl.textContent=error.message;saveBtn.disabled=false}
+});
 document.querySelectorAll('.delete-subject').forEach(button=>button.addEventListener('click',async()=>{
   const subject=button.dataset.subject;
   if(!confirm('Delete '+subject+' and all assignments with this subject?'))return;
@@ -981,27 +1215,54 @@ subjectInput.insertAdjacentElement('afterend',subjectError);
 const dueDateInput=document.createElement('input');
 dueDateInput.type='date';
 dueDateInput.id='dueDateInput';
-dueDateInput.setAttribute('aria-label','Due date');
+dueDateInput.setAttribute('aria-label','Deadline date');
 const localToday=new Date();
 const localTodayValue=localToday.getFullYear()+'-'+String(localToday.getMonth()+1).padStart(2,'0')+'-'+String(localToday.getDate()).padStart(2,'0');
 dueDateInput.min=localTodayValue;
 dueDateInput.value=localTodayValue;
-timeInput.insertAdjacentElement('afterend',dueDateInput);
-submitBtn.addEventListener('click',async()=>{const title=titleInput.value.trim();const subject=subjectInput.value.trim();const estimated=timeInput.value.trim();const dueDate=dueDateInput.value;const knownSubjects=(state.allowedSubjects||[]).map(item=>String(item.name).toLowerCase());subjectError.style.display='none';if(!knownSubjects.includes(subject.toLowerCase())){subjectError.textContent='Subject does not exist. Choose one of your saved subjects.';subjectError.style.display='block';return}if(!title||!subject||!estimated||!dueDate){alert('Please fill in all fields');return}const now=new Date();const todayValue=now.getFullYear()+'-'+String(now.getMonth()+1).padStart(2,'0')+'-'+String(now.getDate()).padStart(2,'0');if(dueDate<todayValue){alert('The due date cannot be in the past.');return}if(dueDate===todayValue&&now.getHours()>=22){alert('Tasks for today must be added before 10:00 PM local time.');return}const params=new URLSearchParams({title,subject,estimated,dueDate});try{const res=await fetch('/add',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:params});const result=await res.json();if(!res.ok||!result.ok)throw new Error(result.error||'Could not add assignment');modal.classList.remove('open');titleInput.value='';subjectInput.value='';timeInput.value='';dueDateInput.value=localTodayValue;location.reload()}catch(e){subjectError.textContent=e.message;subjectError.style.display='block'}});
+const deadlineLabel=document.createElement('div');
+deadlineLabel.textContent='Deadline';
+deadlineLabel.style='font:600 12px DM Sans;color:#182334;margin:4px 0 4px';
+timeInput.insertAdjacentElement('afterend',deadlineLabel);
+deadlineLabel.insertAdjacentElement('afterend',dueDateInput);
+const deadlineTimeInput=document.createElement('input');
+deadlineTimeInput.type='time';
+deadlineTimeInput.id='deadlineTimeInput';
+deadlineTimeInput.setAttribute('aria-label','Deadline time');
+deadlineTimeInput.value='00:00';
+deadlineTimeInput.style='margin-top:8px';
+dueDateInput.insertAdjacentElement('afterend',deadlineTimeInput);
+const deadlineHint=document.createElement('p');
+deadlineHint.textContent='Defaults to 12:00 AM on the date above — work must be finished by the end of the previous day. Adjust the time if this task can run later that day instead.';
+deadlineHint.style='font:11px DM Sans;color:#758196;margin:6px 0 12px;line-height:1.4';
+deadlineTimeInput.insertAdjacentElement('afterend',deadlineHint);
+const spreadOutLabel=document.createElement('label');
+spreadOutLabel.style='display:flex;align-items:center;gap:8px;margin:2px 0 14px;font:13px DM Sans;color:#182334;cursor:pointer';
+const spreadOutInput=document.createElement('input');
+spreadOutInput.type='checkbox';
+spreadOutInput.id='spreadOutInput';
+spreadOutInput.style='width:auto;margin:0';
+spreadOutLabel.appendChild(spreadOutInput);
+spreadOutLabel.appendChild(document.createTextNode('Spread out instead of cramming into one day'));
+deadlineHint.insertAdjacentElement('afterend',spreadOutLabel);
+submitBtn.addEventListener('click',async()=>{const title=titleInput.value.trim();const subject=subjectInput.value.trim();const estimated=timeInput.value.trim();const dueDate=dueDateInput.value;const deadlineTime=deadlineTimeInput.value||'00:00';const spreadOut=spreadOutInput.checked;const knownSubjects=(state.allowedSubjects||[]).map(item=>String(item.name).toLowerCase());subjectError.style.display='none';if(!knownSubjects.includes(subject.toLowerCase())){subjectError.textContent='Subject does not exist. Choose one of your saved subjects.';subjectError.style.display='block';return}if(!title||!subject||!estimated||!dueDate){alert('Please fill in all fields');return}const now=new Date();const todayValue=now.getFullYear()+'-'+String(now.getMonth()+1).padStart(2,'0')+'-'+String(now.getDate()).padStart(2,'0');const cutoffHour=Number.isFinite(state.sameDayCutoffHour)?state.sameDayCutoffHour:22;if(dueDate<todayValue){alert('The due date cannot be in the past.');return}if(dueDate===todayValue&&now.getHours()>=cutoffHour){alert('Tasks for today must be added before '+cutoffHourLabel(cutoffHour)+' local time.');return}const deadline=dueDate+'T'+deadlineTime+':00';const params=new URLSearchParams({title,subject,estimated,dueDate:deadline,spreadOut:spreadOut?'1':'0'});try{const res=await fetch('/add',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:params});const result=await res.json();if(!res.ok||!result.ok)throw new Error(result.error||'Could not add assignment');modal.classList.remove('open');titleInput.value='';subjectInput.value='';timeInput.value='';dueDateInput.value=localTodayValue;deadlineTimeInput.value='00:00';spreadOutInput.checked=false;location.reload()}catch(e){subjectError.textContent=e.message;subjectError.style.display='block'}});
 const calendarGrid=document.getElementById('calendarGrid');
 const sectionHeads=[...document.querySelectorAll('.section-head')];
-const listContent=[tasks,workTasks,sectionHeads[1],workListHeading];
+const listContent=[tasks,tomorrowTasks,workTasks,sectionHeads[1],tomorrowHeading,workListHeading];
 const homeContent=[...document.querySelectorAll('.top,.hero'),...listContent];
-const profileContent=[...listContent,profileSubjectsHeading,profileSubjects];
+const profileContent=[...listContent,profileSubjectsHeading,profileSubjects,profileSchedulingHeading,profileScheduling];
 const calendarContent=[sectionHeads[0],calendarGrid];
 const addButton=document.getElementById('addBtn');
 calendarContent.forEach(item=>item.hidden=true);
 sectionHeads[0].style.display='none';
 calendarGrid.style.display='none';
 sectionHeads[1].style.display='flex';
+tomorrowHeading.style.display='flex';
 workListHeading.style.display='flex';
 profileSubjectsHeading.style.display='none';
 profileSubjects.style.display='none';
+profileSchedulingHeading.style.display='none';
+profileScheduling.style.display='none';
 document.querySelectorAll('.nav').forEach(nav=>nav.addEventListener('click',()=>{
   const label=nav.textContent.trim();
   const isToday=label.includes('Today');
@@ -1014,9 +1275,12 @@ document.querySelectorAll('.nav').forEach(nav=>nav.addEventListener('click',()=>
   profileContent.forEach(item=>item.hidden=!isProfile);
   calendarContent.forEach(item=>item.hidden=!isCalendar);
   sectionHeads[1].style.display=(isToday||isProfile)?'flex':'none';
+  tomorrowHeading.style.display=(isToday||isProfile)?'flex':'none';
   workListHeading.style.display=(isToday||isProfile)?'flex':'none';
   profileSubjectsHeading.style.display=isProfile?'flex':'none';
   profileSubjects.style.display=isProfile?'block':'none';
+  profileSchedulingHeading.style.display=isProfile?'flex':'none';
+  profileScheduling.style.display=isProfile?'block':'none';
   sectionHeads[0].style.display=isCalendar?'flex':'none';
   calendarGrid.style.display=isCalendar?'grid':'none';
   addButton.hidden=!isToday;
@@ -1033,19 +1297,26 @@ function assignmentOrder(a,b){
 }
 saved.sort(assignmentOrder);
 const now=new Date();
-const priorities=[];
+function localDateKey(d){return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0')}
+const todayKey=localDateKey(now);
+const tomorrowDate=new Date(now.getFullYear(),now.getMonth(),now.getDate()+1);
+const tomorrowKey=localDateKey(tomorrowDate);
+const todayTasks=[];
+const tomorrowTasksList=[];
 const workList=[];
 saved.forEach(a=>{
   const due=a.dueDate?new Date(a.dueDate):null;
-  const daysAway=due?(due-now)/86400000:Infinity;
-  const isPart=(a.title||'').includes('(Part ');
-  const isPriority=(daysAway<=7)||(!isPart&&Number(a.estimated||0)>=90);
-  (isPriority?priorities:workList).push(a);
+  const dueKey=due?localDateKey(due):null;
+  if(dueKey===todayKey){todayTasks.push(a)}
+  else if(dueKey===tomorrowKey){tomorrowTasksList.push(a)}
+  else{workList.push(a)}
 });
-priorities.sort(assignmentOrder);
+todayTasks.sort(assignmentOrder);
+tomorrowTasksList.sort(assignmentOrder);
 workList.sort(assignmentOrder);
 function renderTasks(list,target){list.forEach((a,i)=>{const row=document.createElement('div');row.className='task fade';row.style.animationDelay=(i*80)+'ms';row.innerHTML='<span class="dot"></span><div><h3>'+escapeHtml(a.title||'Assignment')+'</h3><p>'+escapeHtml(a.subject||'Study')+' · '+Math.round(a.estimated||0)+' min</p></div><span class="time">'+(a.dueDate?formatDate(a.dueDate):'Soon')+'</span><div class="timer-controls"><button class="start-task" data-action="start">Start</button></div>';row.dataset.title=a.title||'Assignment';row.dataset.due=a.dueDate||'';target.appendChild(row)})}
-renderTasks(priorities,tasks);
+renderTasks(todayTasks,tasks);
+renderTasks(tomorrowTasksList,tomorrowTasks);
 renderTasks(workList,workTasks);
 function setTimerControls(row,mode){
   const controls=row.querySelector('.timer-controls');
