@@ -72,3 +72,7 @@ Everything lives in a single `main.dart` file:
 - Dates can be entered as ISO strings (`2026-08-09`) or `M/D/YY` / `M/D/YYYY` format.
 - Assignments without a due date are scheduled last, after all dated assignments.
 - Reccomended time to get a new version of this app is after every update labeled "MAJOR UPDATE!"
+
+## Credits
+
+Thank you to Levi Pickar for creating the GUI interface
