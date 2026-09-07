@@ -1229,7 +1229,7 @@ const deadlineTimeInput=document.createElement('input');
 deadlineTimeInput.type='time';
 deadlineTimeInput.id='deadlineTimeInput';
 deadlineTimeInput.setAttribute('aria-label','Deadline time');
-deadlineTimeInput.value='00:00';
+deadlineTimeInput.value='23:59';
 deadlineTimeInput.style='margin-top:8px';
 dueDateInput.insertAdjacentElement('afterend',deadlineTimeInput);
 const deadlineHint=document.createElement('p');
