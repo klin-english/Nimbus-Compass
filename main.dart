@@ -37,6 +37,7 @@ class Assignment {
   final double _baselineEfficiency;
   double? _actualTime;
   final DateTime? _dueDate;
+  final DateTime? _deadline;
   final int _parts;
   final bool _spreadOut;
 
@@ -47,11 +48,13 @@ class Assignment {
     DateTime? dueDate,
     int parts = 0,
     bool spreadOut = false,
+    DateTime? deadline,
   ]) : _estimatedTime = estimatedTime.abs(),
        _baselineEfficiency = _subject.efficiencyFactor,
        _dueDate = dueDate,
        _parts = parts,
-       _spreadOut = spreadOut;
+       _spreadOut = spreadOut,
+       _deadline = deadline ?? dueDate;
 
   double get adjustedEstimate {
     return _estimatedTime * _baselineEfficiency;
@@ -70,12 +73,73 @@ class Assignment {
   double? get actualTime => _actualTime;
   bool get isCompleted => _actualTime != null;
   String get title => _title;
+  // The day/time this assignment (or session/chunk) is currently scheduled
+  // for. This can move -- e.g. rolling forward a day when its slot passes
+  // without being completed -- without changing the true deadline below.
   DateTime? get dueDate => _dueDate;
+  // The real due instant. Defaults to dueDate when not explicitly set (e.g.
+  // a freshly added, not-yet-scheduled assignment).
+  DateTime? get deadline => _deadline;
   int get parts => _parts;
   // When true, work sessions for a split assignment are spread evenly
   // across every available day instead of being crammed into as few days
   // as realistically possible.
   bool get spreadOut => _spreadOut;
+}
+
+// A part of an assignment awaiting a concrete time slot, used while
+// scheduling so different assignments' sessions can be interleaved on days
+// they share.
+class _PendingSession {
+  final Assignment root;
+  final int partIndex;
+  final int totalParts;
+  final int minutes;
+  final DateTime sessionDay;
+  final DateTime deadline;
+  final String subjectName;
+  final bool spreadOut;
+
+  _PendingSession({
+    required this.root,
+    required this.partIndex,
+    required this.totalParts,
+    required this.minutes,
+    required this.sessionDay,
+    required this.deadline,
+    required this.subjectName,
+    required this.spreadOut,
+  });
+}
+
+// Reorders sessions so that two sessions from the same root assignment
+// never sit back-to-back when a session from a different assignment could
+// be placed between them instead. Each root's own parts stay in their
+// original relative order (part 1 before part 2, etc.). Falls back to
+// repeating the same root only when there's genuinely no alternative left.
+List<_PendingSession> _interleaveByRoot(List<_PendingSession> items) {
+  final buckets = <Assignment, List<_PendingSession>>{};
+  for (final item in items) {
+    buckets.putIfAbsent(item.root, () => []).add(item);
+  }
+  final keys = buckets.keys.toList();
+  final result = <_PendingSession>[];
+  Assignment? lastKey;
+  while (result.length < items.length) {
+    keys.sort((a, b) => buckets[b]!.length.compareTo(buckets[a]!.length));
+    Assignment? pick;
+    for (final k in keys) {
+      if (buckets[k]!.isEmpty) continue;
+      if (k != lastKey) {
+        pick = k;
+        break;
+      }
+    }
+    pick ??= keys.firstWhere((k) => buckets[k]!.isNotEmpty);
+    result.add(buckets[pick]!.removeAt(0));
+    lastKey = pick;
+  }
+  return result;
 }
 
 class AssignmentTracker {
@@ -143,6 +207,14 @@ class AssignmentTracker {
       final spreadOut = map['spreadOut'] is bool
           ? map['spreadOut'] as bool
           : false;
+      DateTime? deadline;
+      if (map.containsKey('deadline') && map['deadline'] != null) {
+        try {
+          deadline = DateTime.tryParse(map['deadline'] as String);
+        } catch (_) {
+          deadline = null;
+        }
+      }
 
       final assignment = Assignment(
         title,
@@ -151,6 +223,7 @@ class AssignmentTracker {
         due,
         parts,
         spreadOut,
+        deadline,
       );
       if (map.containsKey('actual') && map['actual'] != null) {
         assignment.complete((map['actual'] as num).toDouble());
@@ -189,6 +262,8 @@ class AssignmentTracker {
           'dueDate': a.dueDate?.toIso8601String(),
           'parts': a.parts,
           'spreadOut': a.spreadOut,
+          'likesSubject': a.likesSubject,
+          'deadline': a.deadline?.toIso8601String(),
         };
       }).toList(),
       'allowedSubjects': allowedSubjects.map((subject) {
@@ -205,6 +280,7 @@ class AssignmentTracker {
     DateTime? dueDate,
     int parts = 0,
     bool spreadOut = false,
+    DateTime? deadline,
   ]) {
     final subject = getOrCreateSubject(subjectName);
     final assignment = Assignment(
@@ -214,6 +290,7 @@ class AssignmentTracker {
       dueDate,
       parts,
       spreadOut,
+      deadline,
     );
     assignment.complete(actual);
     assignments.add(assignment);
@@ -227,6 +304,7 @@ class AssignmentTracker {
     DateTime? dueDate,
     int parts = 0,
     bool spreadOut = false,
+    DateTime? deadline,
   ]) {
     final subject = getOrCreateSubject(subjectName);
     final assignment = Assignment(
@@ -236,6 +314,7 @@ class AssignmentTracker {
       dueDate,
       parts,
       spreadOut,
+      deadline,
     );
     assignments.add(assignment);
     return assignment;
@@ -298,22 +377,58 @@ class AssignmentTracker {
     return _subjects.putIfAbsent(key, () => Subject(normalized, true));
   }
 
-  List<Assignment> scheduleAssignments(List<Assignment> pending) {
+  List<Assignment> scheduleAssignments(
+    List<Assignment> pending, {
+    bool forceAll = false,
+  }) {
     final now = DateTime.now();
     final today = DateTime(now.year, now.month, now.day);
     final expanded = <Assignment>[];
 
-    for (final a in pending) {
-      if (a.parts > 1 && a.dueDate != null) {
-        final parts = a.parts;
+    String dayKey(DateTime d) => '${d.year}-${d.month}-${d.day}';
 
-        // `dueDate` is the actual deadline instant (defaults to 12:00 AM /
-        // midnight of the chosen due day, but can carry a later time if the
-        // person customized it). Work must be *finished before* that
-        // instant, so the last day it can land on is the day before the
-        // deadline's calendar day -- unless the deadline has a later
-        // time-of-day that leaves room earlier that same day.
-        final deadline = a.dueDate!;
+    bool needsProcessing(Assignment a) {
+      if (a.dueDate == null) return false;
+      if (forceAll) return true;
+      if (a.parts >= 1) return true; // freshly added, never placed yet
+      final sessionDay = DateTime(
+        a.dueDate!.year,
+        a.dueDate!.month,
+        a.dueDate!.day,
+      );
+      // A slot that has already passed without being completed rolls
+      // forward instead of staying stuck on a day that's gone by. Slots
+      // still on today or a future day are left alone so everything
+      // doesn't get reshuffled every time something new is added.
+      return sessionDay.isBefore(today);
+    }
+
+    // Existing occupancy: sessions not being touched this pass, so new/
+    // moved sessions slot in after them instead of on top of them.
+    final existingCountByDayKey = <String, int>{};
+    for (final p in pending) {
+      if (p.dueDate == null || needsProcessing(p)) continue;
+      final key = dayKey(
+        DateTime(p.dueDate!.year, p.dueDate!.month, p.dueDate!.day),
+      );
+      existingCountByDayKey[key] = (existingCountByDayKey[key] ?? 0) + 1;
+    }
+
+    // Phase 1: figure out which calendar day each session of each
+    // assignment being (re)placed lands on, without assigning exact times
+    // yet. Sessions are grouped by day across ALL assignments so that, in
+    // phase 2, different assignments' sessions can be interleaved on days
+    // they share instead of two parts of the same assignment always
+    // sitting back-to-back. Assignments aren't permanently locked once
+    // split -- anything whose slot has passed (and isn't complete) is
+    // eligible to be replaced here again.
+    final sessionsByDayKey = <String, List<_PendingSession>>{};
+
+    for (final a in pending) {
+      if (needsProcessing(a)) {
+        // The real deadline, preserved separately from the (movable)
+        // scheduled day so repeated reschedules never quietly shrink it.
+        final deadline = a.deadline ?? a.dueDate!;
         final oneMinuteBeforeDeadline = deadline.subtract(
           const Duration(minutes: 1),
         );
@@ -341,8 +456,30 @@ class AssignmentTracker {
         final availableDays =
             lastSchedulableDay.difference(startDay).inDays + 1;
 
-        // compute integer-minute durations for parts that sum to original estimate
         final totalMinutes = a.estimatedTime.round();
+
+        // Decide how many sessions to break this into. "Spread out" tries
+        // to use the smallest realistic chunk size (just over 15 minutes)
+        // so it can fill as many distinct days as possible; if that would
+        // still cram more than one chunk onto some days, the chunk size
+        // grows until each day gets at most one. Otherwise (the default),
+        // use the usual ~45-minute chunking for the cram algorithm below.
+        int parts;
+        if (a.spreadOut) {
+          final maxPartsBySize = totalMinutes % 15 == 0
+              ? (totalMinutes ~/ 15) - 1
+              : totalMinutes ~/ 15;
+          parts = availableDays < maxPartsBySize
+              ? availableDays
+              : maxPartsBySize;
+          if (parts < 1) parts = 1;
+        } else {
+          parts = totalMinutes >= 90
+              ? (totalMinutes / 45).round().clamp(2, 100)
+              : 1;
+        }
+
+        // compute integer-minute durations for chunks that sum to original estimate
         final partMinutesList = <int>[];
         {
           final base = totalMinutes ~/ parts;
@@ -398,97 +535,143 @@ class AssignmentTracker {
           }
         }
 
-        // For every day that ends up with sessions, work out a start time
-        // and a safe spacing so that sessions stacked on the same day never
-        // spill past that day's cutoff (23:59, or the exact deadline time if
-        // this is the deadline's own calendar day) into the next day.
-        final countsByOffset = <int, int>{};
-        for (final offset in dayOffsets) {
-          countsByOffset[offset] = (countsByOffset[offset] ?? 0) + 1;
-        }
-        final dayStart = <int, DateTime>{};
-        final dayIntervalMinutes = <int, int>{};
-        countsByOffset.forEach((offset, count) {
-          final sessionDay = startDay.add(Duration(days: offset));
-          final start = isSameLocalDate(sessionDay, now)
-              ? now
-              : DateTime(sessionDay.year, sessionDay.month, sessionDay.day, 9);
-          final windowEnd = isSameLocalDate(sessionDay, deadline)
-              ? deadline
-              : DateTime(
-                  sessionDay.year,
-                  sessionDay.month,
-                  sessionDay.day,
-                  23,
-                  59,
-                );
-          final availableMinutes = windowEnd.isAfter(start)
-              ? windowEnd.difference(start).inMinutes
-              : 0;
-          final interval = count <= 1
-              ? 0
-              : (availableMinutes ~/ (count - 1)).clamp(0, 60);
-          dayStart[offset] = start;
-          dayIntervalMinutes[offset] = interval;
-        });
-
-        // replace the original assignment with its parts in the tracker's list
+        // Take the original assignment out -- it's being replaced by one or
+        // more single-session assignments below (no longer permanently
+        // locked together as numbered parts).
         try {
           assignments.remove(a);
         } catch (_) {}
 
-        final sessionsOnDay = <int, int>{};
         for (var i = 0; i < parts; i++) {
-          final partMinutes = partMinutesList[i];
-
-          final offsetForPart = dayOffsets[i];
-          final sessionIndex = sessionsOnDay.update(
-            offsetForPart,
-            (v) => v + 1,
-            ifAbsent: () => 0,
-          );
-          final partDue = dayStart[offsetForPart]!.add(
-            Duration(
-              minutes: dayIntervalMinutes[offsetForPart]! * sessionIndex,
-            ),
-          );
-
-          final partTitle = '${a.title} (Part ${i + 1}/$parts)';
-          final partEst = partMinutes.toDouble();
-          final part = addAssignment(
-            partTitle,
-            a.subjectName,
-            partEst,
-            partDue,
-            0,
-          );
-          expanded.add(part);
+          final sessionDay = startDay.add(Duration(days: dayOffsets[i]));
+          final key = dayKey(sessionDay);
+          sessionsByDayKey
+              .putIfAbsent(key, () => [])
+              .add(
+                _PendingSession(
+                  root: a,
+                  partIndex: i,
+                  totalParts: parts,
+                  minutes: partMinutesList[i],
+                  sessionDay: sessionDay,
+                  deadline: deadline,
+                  subjectName: a.subjectName,
+                  spreadOut: a.spreadOut,
+                ),
+              );
         }
       } else {
         expanded.add(a);
       }
     }
 
+    // Phase 2: for every day with new sessions, interleave different
+    // assignments' sessions (when possible) so two sessions of the same
+    // assignment aren't scheduled back-to-back on the same day, then assign
+    // concrete, non-overlapping times that respect whichever deadline is
+    // tightest that day.
+    sessionsByDayKey.forEach((key, sessions) {
+      final ordered = _interleaveByRoot(sessions);
+      final sessionDay = ordered.first.sessionDay;
+      final start = isSameLocalDate(sessionDay, now)
+          ? now
+          : DateTime(sessionDay.year, sessionDay.month, sessionDay.day, 9);
+      var windowEnd = DateTime(
+        sessionDay.year,
+        sessionDay.month,
+        sessionDay.day,
+        23,
+        59,
+      );
+      for (final s in ordered) {
+        if (isSameLocalDate(sessionDay, s.deadline) &&
+            s.deadline.isBefore(windowEnd)) {
+          windowEnd = s.deadline;
+        }
+      }
+      final existing = existingCountByDayKey[key] ?? 0;
+      final totalCount = existing + ordered.length;
+      final availableMinutes = windowEnd.isAfter(start)
+          ? windowEnd.difference(start).inMinutes
+          : 0;
+      final interval = totalCount <= 1
+          ? 0
+          : (availableMinutes ~/ (totalCount - 1)).clamp(0, 60);
+
+      for (var idx = 0; idx < ordered.length; idx++) {
+        final s = ordered[idx];
+        final sessionIndex = existing + idx;
+        final partDue = start.add(Duration(minutes: interval * sessionIndex));
+        // Sessions are single, independently-movable assignments now --
+        // no "(Part x/y)" suffix, just the original title -- and each
+        // carries the true deadline forward so it stays correct even if
+        // this session itself gets rolled or reshuffled again later.
+        // parts is 0 here: this session is considered "placed" and won't
+        // be touched again unless its day passes without being completed
+        // (see needsProcessing) or a full reschedule is requested.
+        final part = addAssignment(
+          s.root.title,
+          s.subjectName,
+          s.minutes.toDouble(),
+          partDue,
+          0,
+          s.spreadOut,
+          s.deadline,
+        );
+        expanded.add(part);
+      }
+    });
+
     expanded.sort((a, b) {
       final aDue = a.dueDate;
       final bDue = b.dueDate;
       if (aDue == null && bDue == null) {
-        if (a.likesSubject != b.likesSubject) return a.likesSubject ? -1 : 1;
         return b.estimatedTime.compareTo(a.estimatedTime);
       } else if (aDue == null) {
         return 1;
       } else if (bDue == null) {
         return -1;
       }
-
-      final cmp = aDue.compareTo(bDue);
-      if (cmp != 0) return cmp;
-
-      if (a.likesSubject != b.likesSubject) return a.likesSubject ? -1 : 1;
-      return b.estimatedTime.compareTo(a.estimatedTime);
+      return aDue.compareTo(bDue);
     });
 
-    return expanded;
+    // Alternate liked/disliked subjects within each same-day group instead
+    // of grouping all liked ones before all disliked ones.
+    final alternated = <Assignment>[];
+    var i = 0;
+    while (i < expanded.length) {
+      var j = i + 1;
+      while (j < expanded.length &&
+          isSameLocalDate(
+            expanded[j].dueDate ?? today,
+            expanded[i].dueDate ?? today,
+          ) &&
+          (expanded[j].dueDate == null) == (expanded[i].dueDate == null)) {
+        j++;
+      }
+      final liked = <Assignment>[];
+      final disliked = <Assignment>[];
+      for (final item in expanded.sublist(i, j)) {
+        (item.likesSubject ? liked : disliked).add(item);
+      }
+      var li = 0, di = 0;
+      var takeLiked = true;
+      while (li < liked.length || di < disliked.length) {
+        if (takeLiked && li < liked.length) {
+          alternated.add(liked[li++]);
+        } else if (!takeLiked && di < disliked.length) {
+          alternated.add(disliked[di++]);
+        } else if (li < liked.length) {
+          alternated.add(liked[li++]);
+        } else {
+          alternated.add(disliked[di++]);
+        }
+        takeLiked = !takeLiked;
+      }
+      i = j;
+    }
+
+    return alternated;
   }
 
   List<Assignment> get pendingAssignments =>
@@ -756,14 +939,9 @@ void cliMain() {
       continue;
     }
 
-    // Compute default parts: split into ~45-minute parts if estimated >= 90 minutes
-    int parts = 0;
-    final est = (parsed['estimate'] as double).abs();
-    if (est >= 90.0) {
-      final ratio = est / 45.0;
-      parts = ratio.round();
-      if (parts < 2) parts = 2;
-    }
+    // A value of 1+ just signals "this still needs to be scheduled";
+    // scheduleAssignments works out the real chunk count and placement.
+    const parts = 1;
 
     final newAssignment = tracker.addAssignment(
       parsed['title'] as String,
@@ -865,6 +1043,14 @@ Future<void> main(List<String> args) async {
 
   server.listen((request) async {
     if (request.method == 'GET') {
+      // Roll any assignment whose scheduled day has already passed
+      // (without being completed) forward, without disturbing anything
+      // still scheduled for today or later.
+      final moved = tracker.scheduleAssignments(tracker.pendingAssignments);
+      if (moved.isNotEmpty) {
+        saveTracker(tracker);
+        exportToIcs(tracker.pendingAssignments);
+      }
       request.response
         ..headers.contentType = ContentType.html
         ..write(phoneAppHtml(tracker.toJson()))
@@ -962,6 +1148,14 @@ Future<void> main(List<String> args) async {
           jsonEncode({'ok': true, 'assignmentsRemoved': assignmentsRemoved}),
         )
         ..close();
+    } else if (request.method == 'POST' && request.uri.path == '/reschedule') {
+      tracker.scheduleAssignments(tracker.pendingAssignments, forceAll: true);
+      saveTracker(tracker);
+      exportToIcs(tracker.pendingAssignments);
+      request.response
+        ..headers.contentType = ContentType.json
+        ..write('{"ok":true}')
+        ..close();
     } else if (request.method == 'POST' && request.uri.path == '/add') {
       final body = await utf8.decoder.bind(request).join();
       final data = Uri.parse('?$body').queryParameters;
@@ -1002,9 +1196,9 @@ Future<void> main(List<String> args) async {
           ..close();
         return;
       }
-      final parts = estimated >= 90
-          ? (estimated / 45).round().clamp(2, 100)
-          : 0;
+      // A value of 1+ just signals "this still needs to be scheduled";
+      // scheduleAssignments works out the real chunk count and placement.
+      const parts = 1;
       final spreadOut = data['spreadOut'] == '1' || data['spreadOut'] == 'true';
       tracker.addAssignment(
         title,
@@ -1013,6 +1207,7 @@ Future<void> main(List<String> args) async {
         dueDate,
         parts,
         spreadOut,
+        dueDate,
       );
       tracker.scheduleAssignments(tracker.pendingAssignments);
       saveTracker(tracker);
@@ -1123,8 +1318,8 @@ String phoneAppHtml(Map<String, dynamic> state) {
 *{box-sizing:border-box}body{margin:0;min-height:100vh;background:radial-gradient(circle at 20% 10%,#dce8ff 0,transparent 32%),linear-gradient(135deg,#eaf0fa,#f8efe8);font-family:'DM Sans',sans-serif;color:var(--ink);display:grid;place-items:center;padding:32px}
 .phone{width:min(100%,390px);height:min(820px,calc(100vh - 40px));min-height:680px;background:var(--paper);border:9px solid #141c2c;border-radius:42px;box-shadow:0 26px 70px #34415c38,0 0 0 2px #fff;overflow:hidden;position:relative}
 .phone:before{content:'';position:absolute;z-index:5;top:8px;left:50%;transform:translateX(-50%);width:92px;height:22px;border-radius:0 0 16px 16px;background:#141c2c}.screen{height:100%;overflow:auto;padding:38px 21px 22px;scrollbar-width:none}.screen::-webkit-scrollbar{display:none}
-.status{display:flex;justify-content:space-between;font-size:11px;font-weight:700;margin:0 3px 19px}.top{display:flex;justify-content:space-between;align-items:center;margin-bottom:22px}.eyebrow{font-size:12px;color:var(--muted);font-weight:600}.brand{font:700 25px 'Space Grotesk';letter-spacing:-.8px;margin-top:3px}.avatar{width:39px;height:39px;border-radius:50%;background:#ffcdb8;display:grid;place-items:center;font-weight:700;color:#a14d3b}.hero{background:linear-gradient(135deg,#4b7bf1,#6f95f7);border-radius:24px;padding:21px;color:white;position:relative;overflow:hidden;box-shadow:0 12px 24px #4777ee31}.hero:after{content:'';position:absolute;width:145px;height:145px;border:22px solid #ffffff20;border-radius:50%;right:-42px;top:-48px}.hero h1{font:600 21px 'Space Grotesk';margin:0 0 8px}.hero p{font-size:13px;line-height:1.5;margin:0;width:73%;color:#e9efff}.progress{margin-top:19px;background:#ffffff35;height:7px;border-radius:8px;overflow:hidden}.progress i{display:block;width:64%;height:100%;background:white;border-radius:8px}.hero small{display:block;margin-top:8px;color:#dbe5ff;font-size:11px}.section-head{display:flex;justify-content:space-between;align-items:center;margin:25px 2px 13px}.section-head h2{font:600 17px 'Space Grotesk';margin:0}.section-head span{color:var(--blue);font-size:12px;font-weight:700}.task{display:flex;gap:12px;padding:14px 12px;background:white;border:1px solid var(--line);border-radius:17px;margin-bottom:10px;box-shadow:0 4px 12px #384b7410}.dot{width:11px;height:11px;border-radius:50%;background:var(--coral);margin-top:4px;flex:none}.dot.green{background:#53c59f}.task h3{font-size:14px;margin:0 0 5px}.task p{margin:0;color:var(--muted);font-size:11px}.time{margin-left:auto;white-space:nowrap;font-size:11px;color:var(--muted);font-weight:600}.week{display:grid;grid-template-columns:repeat(7,1fr);gap:6px}.day{height:54px;border-radius:13px;background:#f4f6fa;text-align:center;padding-top:8px;font-size:10px;color:var(--muted)}.day b{display:block;color:var(--ink);font-size:15px;margin-top:5px}.day.active{background:var(--ink);color:white}.day.active b{color:white}.bottom{display:grid;grid-template-columns:repeat(4,1fr);gap:4px;background:white;border-top:1px solid var(--line);padding:13px 4px 4px;margin:23px -21px -22px;position:sticky;bottom:-22px}.nav{border:0;background:transparent;color:#9aa5b7;font:600 10px 'DM Sans';display:grid;gap:5px;justify-items:center;padding:5px;cursor:pointer}.nav .ico{font-size:19px;line-height:1}.nav.selected{color:var(--blue)}.add{position:absolute;right:23px;bottom:74px;width:52px;height:52px;border:0;border-radius:18px;background:var(--coral);color:white;font-size:27px;box-shadow:0 10px 20px #ff876e55;cursor:pointer}.fade{animation:rise .65s both}@keyframes rise{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:none}}.modal{display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.4);z-index:100;align-items:center;justify-content:center}.modal.open{display:flex}.modal-box{background:var(--paper);border-radius:24px;padding:24px;width:min(340px,90%);box-shadow:0 20px 60px rgba(0,0,0,.3)}.modal h2{font:600 18px 'Space Grotesk';margin:0 0 18px}.modal input{width:100%;padding:11px 13px;margin-bottom:12px;border:1px solid var(--line);border-radius:12px;font:14px 'DM Sans';color:var(--ink)}.modal input:focus{outline:none;border-color:var(--blue)}.modal-buttons{display:flex;gap:10px}.modal-buttons button{flex:1;padding:11px;border:1px solid var(--line);border-radius:10px;font:600 13px 'DM Sans';cursor:pointer}.modal-buttons .btn-cancel{background:white;color:var(--ink)}.modal-buttons .btn-add{background:var(--coral);border-color:var(--coral);color:white}
-<style>.day-header{height:20px;text-align:center;font-size:10px;font-weight:700;color:var(--muted)}.calendar-day{height:62px;padding:7px 3px;overflow:hidden}.calendar-day span{display:block;font-weight:700;color:var(--ink)}.calendar-day small{display:block;margin-top:4px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;font-size:8px;color:var(--blue)}.calendar-day.has-event{background:var(--pale)}.calendar-day.active{background:var(--ink)}.calendar-day.active span,.calendar-day.active small{color:white}.blank{visibility:hidden}</style></head><body><main class="phone"><section class="screen"><div class="status"><span>9:41</span><span>● ● ▰</span></div><div class="top"><div><div class="eyebrow">Thursday, August 20</div><div class="brand">Nimbus Compass</div></div><div class="avatar">KL</div></div><article class="hero fade"><h1>Keep your momentum.</h1><p>A calmer study plan, built around your energy and your deadlines.</p><div class="progress"><i></i></div><small>3 of 5 focus sessions completed</small></article><div class="section-head"><h2>This week</h2><span>August 2026</span></div><div class="week fade" id="calendarGrid"></div><div class="section-head"><h2>Today</h2><span>View calendar</span></div><div id="tasks"></div><button class="add" aria-label="Add assignment" id="addBtn">+</button><div class="modal" id="addModal"><div class="modal-box"><h2>New Assignment</h2><input type="text" id="titleInput" placeholder="Assignment name" autocomplete="off"><input type="text" id="subjectInput" placeholder="Subject" autocomplete="off"><input type="number" id="timeInput" placeholder="Time (minutes)" min="0" autocomplete="off"><div class="modal-buttons"><button class="btn-cancel" id="cancelBtn">Cancel</button><button class="btn-add" id="submitBtn">Add</button></div></div></div><nav class="bottom"><button class="nav selected"><span class="ico">⌂</span>Today</button><button class="nav"><span class="ico">▦</span>Calendar</button><button class="nav"><span class="ico">◷</span>Focus</button><button class="nav"><span class="ico">◌</span>Profile</button></nav></section></main><script>
+.status{display:flex;justify-content:space-between;font-size:11px;font-weight:700;margin:0 3px 19px}.top{display:flex;justify-content:space-between;align-items:center;margin-bottom:22px}.eyebrow{font-size:12px;color:var(--muted);font-weight:600}.brand{font:700 25px 'Space Grotesk';letter-spacing:-.8px;margin-top:3px}.avatar{width:39px;height:39px;border-radius:50%;background:#ffcdb8;display:grid;place-items:center;font-weight:700;color:#a14d3b}.hero{background:linear-gradient(135deg,#4b7bf1,#6f95f7);border-radius:24px;padding:21px;color:white;position:relative;overflow:hidden;box-shadow:0 12px 24px #4777ee31}.hero:after{content:'';position:absolute;width:145px;height:145px;border:22px solid #ffffff20;border-radius:50%;right:-42px;top:-48px}.hero h1{font:600 21px 'Space Grotesk';margin:0 0 8px}.hero p{font-size:13px;line-height:1.5;margin:0;width:73%;color:#e9efff}.progress{margin-top:19px;background:#ffffff35;height:7px;border-radius:8px;overflow:hidden}.progress i{display:block;width:64%;height:100%;background:white;border-radius:8px}.hero small{display:block;margin-top:8px;color:#dbe5ff;font-size:11px}.section-head{display:flex;justify-content:space-between;align-items:center;margin:25px 2px 13px}.section-head h2{font:600 17px 'Space Grotesk';margin:0}.section-head span{color:var(--blue);font-size:12px;font-weight:700}.task{display:flex;gap:12px;padding:14px 12px;background:white;border:1px solid var(--line);border-radius:17px;margin-bottom:10px;box-shadow:0 4px 12px #384b7410}.dot{width:11px;height:11px;border-radius:50%;background:var(--coral);margin-top:4px;flex:none}.dot.green{background:#53c59f}.task h3{font-size:14px;margin:0 0 5px}.task p{margin:0;color:var(--muted);font-size:11px}.time{margin-left:auto;white-space:nowrap;font-size:11px;color:var(--muted);font-weight:600}.week{display:grid;grid-template-columns:repeat(7,1fr);gap:6px}.day{height:54px;border-radius:13px;background:#f4f6fa;text-align:center;padding-top:8px;font-size:10px;color:var(--muted)}.day b{display:block;color:var(--ink);font-size:15px;margin-top:5px}.day.active{background:var(--ink);color:white}.day.active b{color:white}.bottom{display:grid;grid-template-columns:repeat(4,1fr);gap:4px;background:white;border-top:1px solid var(--line);padding:13px 4px 4px;margin:23px -21px -22px;position:sticky;bottom:-22px}.nav{border:0;background:transparent;color:#9aa5b7;font:600 10px 'DM Sans';display:grid;gap:5px;justify-items:center;padding:5px;cursor:pointer}.nav .ico{font-size:19px;line-height:1}.nav.selected{color:var(--blue)}.add{position:absolute;right:23px;bottom:74px;width:52px;height:52px;border:0;border-radius:18px;background:var(--coral);color:white;font-size:27px;box-shadow:0 10px 20px #ff876e55;cursor:pointer}.reschedule{position:absolute;right:23px;bottom:136px;width:52px;height:52px;border:0;border-radius:18px;background:var(--blue);color:white;font-size:22px;box-shadow:0 10px 20px #4777ee55;cursor:pointer}.fade{animation:rise .65s both}@keyframes rise{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:none}}.modal{display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.4);z-index:100;align-items:center;justify-content:center}.modal.open{display:flex}.modal-box{background:var(--paper);border-radius:24px;padding:24px;width:min(340px,90%);box-shadow:0 20px 60px rgba(0,0,0,.3)}.modal h2{font:600 18px 'Space Grotesk';margin:0 0 18px}.modal input{width:100%;padding:11px 13px;margin-bottom:12px;border:1px solid var(--line);border-radius:12px;font:14px 'DM Sans';color:var(--ink)}.modal input:focus{outline:none;border-color:var(--blue)}.modal-buttons{display:flex;gap:10px}.modal-buttons button{flex:1;padding:11px;border:1px solid var(--line);border-radius:10px;font:600 13px 'DM Sans';cursor:pointer}.modal-buttons .btn-cancel{background:white;color:var(--ink)}.modal-buttons .btn-add{background:var(--coral);border-color:var(--coral);color:white}
+<style>.day-header{height:20px;text-align:center;font-size:10px;font-weight:700;color:var(--muted)}.calendar-day{height:62px;padding:7px 3px;overflow:hidden}.calendar-day span{display:block;font-weight:700;color:var(--ink)}.calendar-day small{display:block;margin-top:4px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;font-size:8px;color:var(--blue)}.calendar-day.has-event{background:var(--pale)}.calendar-day.active{background:var(--ink)}.calendar-day.active span,.calendar-day.active small{color:white}.blank{visibility:hidden}</style></head><body><main class="phone"><section class="screen"><div class="status"><span>9:41</span><span>● ● ▰</span></div><div class="top"><div><div class="eyebrow">Thursday, August 20</div><div class="brand">Nimbus Compass</div></div><div class="avatar">KL</div></div><article class="hero fade"><h1>Keep your momentum.</h1><p>A calmer study plan, built around your energy and your deadlines.</p><div class="progress"><i></i></div><small>3 of 5 focus sessions completed</small></article><div class="section-head"><h2>This week</h2><span>August 2026</span></div><div class="week fade" id="calendarGrid"></div><div class="section-head"><h2>Today</h2><span>View calendar</span></div><div id="tasks"></div><button class="add" aria-label="Add assignment" id="addBtn">+</button><button class="reschedule" aria-label="Reschedule assignments" id="rescheduleBtn">↻</button><div class="modal" id="addModal"><div class="modal-box"><h2>New Assignment</h2><input type="text" id="titleInput" placeholder="Assignment name" autocomplete="off"><input type="text" id="subjectInput" placeholder="Subject" autocomplete="off"><input type="number" id="timeInput" placeholder="Time (minutes)" min="0" autocomplete="off"><div class="modal-buttons"><button class="btn-cancel" id="cancelBtn">Cancel</button><button class="btn-add" id="submitBtn">Add</button></div></div></div><nav class="bottom"><button class="nav selected"><span class="ico">⌂</span>Today</button><button class="nav"><span class="ico">▦</span>Calendar</button><button class="nav"><span class="ico">◷</span>Focus</button><button class="nav"><span class="ico">◌</span>Profile</button></nav></section></main><script>
 const state=$encodedState;
 if(!(state.allowedSubjects||[]).length){
   const overlay=document.createElement('div');
@@ -1233,7 +1428,7 @@ deadlineTimeInput.value='23:59';
 deadlineTimeInput.style='margin-top:8px';
 dueDateInput.insertAdjacentElement('afterend',deadlineTimeInput);
 const deadlineHint=document.createElement('p');
-deadlineHint.textContent='Defaults to 12:00 AM on the date above — work must be finished by the end of the previous day. Adjust the time if this task can run later that day instead.';
+deadlineHint.textContent='Defaults to 11:59 PM on the date above, so the assignment stays usable through its whole due day. Move it earlier if it actually needs to be finished sooner.';
 deadlineHint.style='font:11px DM Sans;color:#758196;margin:6px 0 12px;line-height:1.4';
 deadlineTimeInput.insertAdjacentElement('afterend',deadlineHint);
 const spreadOutLabel=document.createElement('label');
@@ -1245,7 +1440,7 @@ spreadOutInput.style='width:auto;margin:0';
 spreadOutLabel.appendChild(spreadOutInput);
 spreadOutLabel.appendChild(document.createTextNode('Spread out instead of cramming into one day'));
 deadlineHint.insertAdjacentElement('afterend',spreadOutLabel);
-submitBtn.addEventListener('click',async()=>{const title=titleInput.value.trim();const subject=subjectInput.value.trim();const estimated=timeInput.value.trim();const dueDate=dueDateInput.value;const deadlineTime=deadlineTimeInput.value||'00:00';const spreadOut=spreadOutInput.checked;const knownSubjects=(state.allowedSubjects||[]).map(item=>String(item.name).toLowerCase());subjectError.style.display='none';if(!knownSubjects.includes(subject.toLowerCase())){subjectError.textContent='Subject does not exist. Choose one of your saved subjects.';subjectError.style.display='block';return}if(!title||!subject||!estimated||!dueDate){alert('Please fill in all fields');return}const now=new Date();const todayValue=now.getFullYear()+'-'+String(now.getMonth()+1).padStart(2,'0')+'-'+String(now.getDate()).padStart(2,'0');const cutoffHour=Number.isFinite(state.sameDayCutoffHour)?state.sameDayCutoffHour:22;if(dueDate<todayValue){alert('The due date cannot be in the past.');return}if(dueDate===todayValue&&now.getHours()>=cutoffHour){alert('Tasks for today must be added before '+cutoffHourLabel(cutoffHour)+' local time.');return}const deadline=dueDate+'T'+deadlineTime+':00';const params=new URLSearchParams({title,subject,estimated,dueDate:deadline,spreadOut:spreadOut?'1':'0'});try{const res=await fetch('/add',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:params});const result=await res.json();if(!res.ok||!result.ok)throw new Error(result.error||'Could not add assignment');modal.classList.remove('open');titleInput.value='';subjectInput.value='';timeInput.value='';dueDateInput.value=localTodayValue;deadlineTimeInput.value='00:00';spreadOutInput.checked=false;location.reload()}catch(e){subjectError.textContent=e.message;subjectError.style.display='block'}});
+submitBtn.addEventListener('click',async()=>{const title=titleInput.value.trim();const subject=subjectInput.value.trim();const estimated=timeInput.value.trim();const dueDate=dueDateInput.value;const deadlineTime=deadlineTimeInput.value||'23:59';const spreadOut=spreadOutInput.checked;const knownSubjects=(state.allowedSubjects||[]).map(item=>String(item.name).toLowerCase());subjectError.style.display='none';if(!knownSubjects.includes(subject.toLowerCase())){subjectError.textContent='Subject does not exist. Choose one of your saved subjects.';subjectError.style.display='block';return}if(!title||!subject||!estimated||!dueDate){alert('Please fill in all fields');return}const now=new Date();const todayValue=now.getFullYear()+'-'+String(now.getMonth()+1).padStart(2,'0')+'-'+String(now.getDate()).padStart(2,'0');const cutoffHour=Number.isFinite(state.sameDayCutoffHour)?state.sameDayCutoffHour:22;if(dueDate<todayValue){alert('The due date cannot be in the past.');return}if(dueDate===todayValue&&now.getHours()>=cutoffHour){alert('Tasks for today must be added before '+cutoffHourLabel(cutoffHour)+' local time.');return}const deadline=dueDate+'T'+deadlineTime+':00';const params=new URLSearchParams({title,subject,estimated,dueDate:deadline,spreadOut:spreadOut?'1':'0'});try{const res=await fetch('/add',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:params});const result=await res.json();if(!res.ok||!result.ok)throw new Error(result.error||'Could not add assignment');modal.classList.remove('open');titleInput.value='';subjectInput.value='';timeInput.value='';dueDateInput.value=localTodayValue;deadlineTimeInput.value='23:59';spreadOutInput.checked=false;location.reload()}catch(e){subjectError.textContent=e.message;subjectError.style.display='block'}});
 const calendarGrid=document.getElementById('calendarGrid');
 const sectionHeads=[...document.querySelectorAll('.section-head')];
 const listContent=[tasks,tomorrowTasks,workTasks,sectionHeads[1],tomorrowHeading,workListHeading];
@@ -1253,6 +1448,7 @@ const homeContent=[...document.querySelectorAll('.top,.hero'),...listContent];
 const profileContent=[...listContent,profileSubjectsHeading,profileSubjects,profileSchedulingHeading,profileScheduling];
 const calendarContent=[sectionHeads[0],calendarGrid];
 const addButton=document.getElementById('addBtn');
+const rescheduleBtn=document.getElementById('rescheduleBtn');
 calendarContent.forEach(item=>item.hidden=true);
 sectionHeads[0].style.display='none';
 calendarGrid.style.display='none';
@@ -1284,6 +1480,7 @@ document.querySelectorAll('.nav').forEach(nav=>nav.addEventListener('click',()=>
   sectionHeads[0].style.display=isCalendar?'flex':'none';
   calendarGrid.style.display=isCalendar?'grid':'none';
   addButton.hidden=!isToday;
+  rescheduleBtn.hidden=!isToday;
 }));
 const saved=(state.assignments||[]).filter(a=>!a.actual);
 function assignmentRoot(title){const value=String(title||'');const marker=' (Part ';const index=value.indexOf(marker);return index<0?value:value.slice(0,index)}
@@ -1314,10 +1511,32 @@ saved.forEach(a=>{
 todayTasks.sort(assignmentOrder);
 tomorrowTasksList.sort(assignmentOrder);
 workList.sort(assignmentOrder);
+function interleaveByPreference(list){
+  const groups=new Map();
+  list.forEach(a=>{
+    const key=a.dueDate?localDateKey(new Date(a.dueDate)):'no-date';
+    if(!groups.has(key))groups.set(key,[]);
+    groups.get(key).push(a);
+  });
+  const result=[];
+  groups.forEach(group=>{
+    const liked=group.filter(a=>a.likesSubject);
+    const disliked=group.filter(a=>!a.likesSubject);
+    let li=0,di=0,takeLiked=true;
+    while(li<liked.length||di<disliked.length){
+      if(takeLiked&&li<liked.length){result.push(liked[li++])}
+      else if(!takeLiked&&di<disliked.length){result.push(disliked[di++])}
+      else if(li<liked.length){result.push(liked[li++])}
+      else{result.push(disliked[di++])}
+      takeLiked=!takeLiked;
+    }
+  });
+  return result;
+}
 function renderTasks(list,target){list.forEach((a,i)=>{const row=document.createElement('div');row.className='task fade';row.style.animationDelay=(i*80)+'ms';row.innerHTML='<span class="dot"></span><div><h3>'+escapeHtml(a.title||'Assignment')+'</h3><p>'+escapeHtml(a.subject||'Study')+' · '+Math.round(a.estimated||0)+' min</p></div><span class="time">'+(a.dueDate?formatDate(a.dueDate):'Soon')+'</span><div class="timer-controls"><button class="start-task" data-action="start">Start</button></div>';row.dataset.title=a.title||'Assignment';row.dataset.due=a.dueDate||'';target.appendChild(row)})}
-renderTasks(todayTasks,tasks);
-renderTasks(tomorrowTasksList,tomorrowTasks);
-renderTasks(workList,workTasks);
+renderTasks(interleaveByPreference(todayTasks),tasks);
+renderTasks(interleaveByPreference(tomorrowTasksList),tomorrowTasks);
+renderTasks(interleaveByPreference(workList),workTasks);
 function setTimerControls(row,mode){
   const controls=row.querySelector('.timer-controls');
   if(mode==='start'){controls.innerHTML='<button class="start-task" data-action="start">Start</button>';}
@@ -1360,6 +1579,17 @@ function renderCalendar(){
 }
 renderCalendar();
 addBtn.addEventListener('click',()=>modal.classList.add('open'));
+rescheduleBtn.addEventListener('click',async()=>{
+  rescheduleBtn.disabled=true;
+  const originalText=rescheduleBtn.textContent;
+  rescheduleBtn.textContent='…';
+  try{
+    const response=await fetch('/reschedule',{method:'POST'});
+    const result=await response.json();
+    if(!response.ok||!result.ok)throw new Error(result.error||'Could not reschedule');
+    location.reload();
+  }catch(error){alert(error.message);rescheduleBtn.disabled=false;rescheduleBtn.textContent=originalText}
+});
 cancelBtn.addEventListener('click',()=>{modal.classList.remove('open');titleInput.value='';subjectInput.value='';timeInput.value=''});
 function escapeHtml(v){return String(v).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[c]))}function formatDate(v){const d=new Date(v);return (d.getMonth()+1)+'/'+d.getDate()}
 </script></body></html>''';
