@@ -91,4 +91,7 @@ Everything lives in a single `main.dart` file:
 - Update the readme when closer to complete
 - Use X/X for the date instead of just the date that it should be completed on
 - Resolve bug of pushing everything onto one day for no reason (rare bug)
-- Show Due Dates instead of showing the day it should be done on (duplicate occasion otherwise)
+- Show Due Dates instead of showing the day it should be done on (duplicate occasion otherwise) in case app crashes
+- Update the top date to be correct
+- Change the logo to be accurate to the person
+- Add step by step instruction (once complete) to installing the app including SDK
